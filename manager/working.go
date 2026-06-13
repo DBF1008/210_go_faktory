@@ -27,6 +27,7 @@ type Reservation struct {
 	Since     string      `json:"reserved_at"`
 	Expiry    string      `json:"expires_at"`
 	Wid       string      `json:"wid"`
+	Extension time.Time   `json:"extended_until,omitempty"`
 }
 
 func (res *Reservation) ReservedAt() time.Time {
@@ -42,6 +43,7 @@ func (m *manager) ExtendReservation(ctx context.Context, jid string, until time.
 	if localres, ok := m.workingMap[jid]; ok {
 		if localres.texpiry.Before(until) {
 			localres.extension = until
+			localres.Extension = until
 		}
 	}
 	m.workingMutex.Unlock()
@@ -81,6 +83,15 @@ func (m *manager) loadWorkingSet(ctx context.Context) error {
 	defer m.workingMutex.Unlock()
 
 	addedCount := 0
+	// Track entries whose sorted set score needs updating because
+	// a persisted extension changed the effective expiry.
+	type scoreUpdate struct {
+		entry   storage.SortedEntry
+		newData []byte
+		expiry  string
+	}
+	var updates []scoreUpdate
+
 	err := m.store.Working().Each(ctx, func(idx int, entry storage.SortedEntry) error {
 		var res Reservation
 		err := util.JsonUnmarshal(entry.Value(), &res)
@@ -91,6 +102,41 @@ func (m *manager) loadWorkingSet(ctx context.Context) error {
 			util.Error("Unable to restore working job", err)
 			return nil
 		}
+
+		// Restore unexported time fields from their serialized string forms.
+		// Without this, tsince/texpiry remain zero-valued after restart,
+		// causing ACK/FAIL to use stale or zero expiry for sorted set lookups.
+		if res.Since != "" {
+			if t, err := util.ParseTime(res.Since); err == nil {
+				res.tsince = t
+			} else {
+				util.Warnf("Unable to parse reserved_at for %s: %v", res.Job.Jid, err)
+			}
+		}
+		if res.Expiry != "" {
+			if t, err := util.ParseTime(res.Expiry); err == nil {
+				res.texpiry = t
+			} else {
+				util.Warnf("Unable to parse expires_at for %s: %v", res.Job.Jid, err)
+			}
+		}
+
+		// Restore persisted extension so it survives restart.
+		// Without this, an extended reservation would be reaped at its
+		// original expiry after a restart even though the worker extended it.
+		if !res.Extension.IsZero() && res.Extension.After(res.texpiry) {
+			res.texpiry = res.Extension
+			res.Expiry = util.Thens(res.Extension)
+			// The sorted set score still reflects the original expiry.
+			// Schedule a score update so the entry is found at the correct position.
+			data, merr := json.Marshal(&res)
+			if merr != nil {
+				util.Warnf("Unable to marshal extended reservation for %s: %v", res.Job.Jid, merr)
+			} else {
+				updates = append(updates, scoreUpdate{entry: entry, newData: data, expiry: res.Expiry})
+			}
+		}
+
 		m.workingMap[res.Job.Jid] = &res
 		addedCount++
 		return nil
@@ -99,6 +145,25 @@ func (m *manager) loadWorkingSet(ctx context.Context) error {
 	if err != nil {
 		util.Error("Error restoring working set", err)
 		return fmt.Errorf("cannot restore working set: %w", err)
+	}
+
+	// Apply deferred sorted set score updates for extended reservations.
+	// This is done outside the Each() iteration to avoid mutating the
+	// sorted set while paging through it.
+	for _, u := range updates {
+		if err := m.store.Working().RemoveEntry(ctx, u.entry); err != nil {
+			util.Warnf("Unable to update working set score: %v", err)
+			continue
+		}
+		// Extract JID from the entry for AddElement
+		var tmp Reservation
+		if err := util.JsonUnmarshal(u.newData, &tmp); err != nil {
+			util.Warnf("Unable to unmarshal for score update: %v", err)
+			continue
+		}
+		if err := m.store.Working().AddElement(ctx, u.expiry, tmp.Job.Jid, u.newData); err != nil {
+			util.Warnf("Unable to re-add extended reservation: %v", err)
+		}
 	}
 
 	if addedCount > 0 {
@@ -212,7 +277,14 @@ func (m *manager) ReapExpiredJobs(ctx context.Context, when time.Time) (int64, e
 				localres.texpiry = localres.extension
 				localres.Expiry = util.Thens(localres.extension)
 				util.Debugf("Auto-extending reservation time for %s to %s", jid, localres.Expiry)
-				err = m.store.Working().AddElement(ctx, localres.Expiry, jid, data)
+				// Re-marshal so the JSON member in the sorted set reflects
+				// the updated Expiry (and any Extension) rather than the
+				// stale original data that was just removed.
+				newData, merr := json.Marshal(localres)
+				if merr != nil {
+					return fmt.Errorf("cannot marshal extended reservation for %q: %w", jid, merr)
+				}
+				err = m.store.Working().AddElement(ctx, localres.Expiry, jid, newData)
 				if err != nil {
 					return fmt.Errorf("cannot extend reservation for %q job: %w", jid, err)
 				}
