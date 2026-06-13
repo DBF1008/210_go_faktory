@@ -127,10 +127,27 @@ func (s *Server) Reload() {
 			util.Warnf("Subsystem %s returned reload error: %v", subsystem.Name(), err)
 		}
 	}
+	s.applyDeadTTL()
 }
 
 func (s *Server) AddTask(everySec int64, task Taskable) {
 	s.taskRunner.AddTask(everySec, task)
+}
+
+// applyDeadTTL reads the dead_ttl configuration option and updates
+// the manager's dead job retention duration. If the config value is
+// missing or invalid, the default (180 days) is used.
+func (s *Server) applyDeadTTL() {
+	ttl := s.Options.Duration("faktory", "dead_ttl", manager.DefaultDeadTTL)
+	if ttl <= 0 {
+		util.Warnf("Invalid dead_ttl value, using default %s", manager.DefaultDeadTTL)
+		ttl = manager.DefaultDeadTTL
+	}
+	old := s.manager.DeadTTL()
+	if ttl != old {
+		s.manager.SetDeadTTL(ttl)
+		util.Infof("Dead job TTL set to %s", FormatDuration(ttl))
+	}
 }
 
 func (s *Server) Boot() error {
@@ -159,6 +176,7 @@ func (s *Server) Boot() error {
 	s.store = store
 	s.workers = newWorkers()
 	s.manager = manager.NewManager(store)
+	s.applyDeadTTL()
 	s.listener = listener
 	s.stopper = make(chan bool)
 	s.startTasks()

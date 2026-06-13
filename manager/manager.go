@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/contribsys/faktory/client"
@@ -19,8 +20,10 @@ const (
 	// in the job payload.
 	DefaultTimeout = 30 * 60
 
-	// Save dead jobs for 180 days, after that they will be purged
-	DeadTTL = 180 * 24 * time.Hour
+	// DefaultDeadTTL is the default duration that dead jobs are retained
+	// in the morgue before being purged. Jobs will be saved for 180 days
+	// unless overridden by the dead_ttl config option.
+	DefaultDeadTTL = 180 * 24 * time.Hour
 )
 
 // A KnownError is one that returns a specific error code to the client
@@ -115,6 +118,14 @@ type Manager interface {
 	KV() storage.KV
 	Redis() *redis.Client
 	SetFetcher(f Fetcher)
+
+	// DeadTTL returns the current configured retention duration for dead jobs.
+	DeadTTL() time.Duration
+
+	// SetDeadTTL updates the retention duration for dead jobs.
+	// This is safe to call concurrently and takes effect immediately
+	// for any jobs entering the morgue after the call.
+	SetDeadTTL(ttl time.Duration)
 }
 
 func NewManager(s storage.Store) Manager {
@@ -130,6 +141,7 @@ func newManager(s storage.Store) *manager {
 		ackChain:   make(MiddlewareChain, 0),
 		fetchChain: make(MiddlewareChain, 0),
 	}
+	m.deadTTL.Store(DefaultDeadTTL)
 	ctx := context.Background()
 	_ = m.loadWorkingSet(ctx)
 	p, _ := s.PausedQueues(ctx)
@@ -176,6 +188,10 @@ type manager struct {
 
 	fetcher Fetcher
 
+	// deadTTL is the configured retention duration for dead jobs in the morgue.
+	// Stored as atomic.Value (holding time.Duration) for lock-free concurrent reads.
+	deadTTL atomic.Value
+
 	// Hold the working set in memory so we don't need to burn CPU
 	// when doing 1000s of jobs/sec.
 	// When client ack's JID, we can lookup reservation
@@ -187,6 +203,14 @@ type manager struct {
 	ackChain     MiddlewareChain
 	paused       []string
 	workingMutex sync.RWMutex
+}
+
+func (m *manager) DeadTTL() time.Duration {
+	return m.deadTTL.Load().(time.Duration)
+}
+
+func (m *manager) SetDeadTTL(ttl time.Duration) {
+	m.deadTTL.Store(ttl)
 }
 
 func (m *manager) Push(ctx context.Context, job *client.Job) error {

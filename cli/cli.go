@@ -8,11 +8,14 @@ import (
 	"os/signal"
 	"os/user"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/BurntSushi/toml"
 	"github.com/contribsys/faktory/client"
+	"github.com/contribsys/faktory/manager"
 	"github.com/contribsys/faktory/server"
 	"github.com/contribsys/faktory/storage"
 	"github.com/contribsys/faktory/util"
@@ -179,6 +182,19 @@ func BuildServer(opts *CliOptions) (*server.Server, func() error, error) {
 	util.Debug("Merged configuration")
 	util.Debugf("%v", globalConfig)
 
+	// Parse dead_ttl from config and store as time.Duration in GlobalConfig
+	// so that the server can read it via ServerOptions.Duration().
+	// This is done here (not in server) because duration string parsing
+	// is a CLI/config-level concern.
+	if deadTTL := parseDeadTTL(globalConfig); deadTTL > 0 {
+		faktoryCfg, ok := globalConfig["faktory"].(map[string]any)
+		if !ok {
+			faktoryCfg = map[string]any{}
+			globalConfig["faktory"] = faktoryCfg
+		}
+		faktoryCfg["dead_ttl"] = deadTTL
+	}
+
 	s, err := server.NewServer(sopts)
 	if err != nil {
 		return nil, stopper, err
@@ -198,6 +214,38 @@ func stringConfig(cfg map[string]any, subsys string, elm string, defval string) 
 		}
 	}
 	return defval
+}
+
+// parseDeadTTL reads the dead_ttl value from the [faktory] section of
+// the config and returns it as a time.Duration. Returns 0 if not set
+// or unparseable, which tells the caller to fall back to the default.
+func parseDeadTTL(cfg map[string]any) time.Duration {
+	raw := stringConfig(cfg, "faktory", "dead_ttl", "")
+	if raw == "" {
+		return 0
+	}
+	return parseDuration(raw, manager.DefaultDeadTTL)
+}
+
+// parseDuration parses a duration string, supporting Go standard durations
+// (e.g. "2160h", "130m") as well as a day-based suffix (e.g. "90d", "180d").
+func parseDuration(s string, defval time.Duration) time.Duration {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return defval
+	}
+	if strings.HasSuffix(s, "d") {
+		numStr := strings.TrimSuffix(s, "d")
+		if days, err := strconv.Atoi(numStr); err == nil {
+			return time.Duration(days) * 24 * time.Hour
+		}
+	}
+	d, err := time.ParseDuration(s)
+	if err != nil {
+		util.Warnf("Cannot parse duration %q: %v, using default", s, err)
+		return defval
+	}
+	return d
 }
 
 // Read all config files in:

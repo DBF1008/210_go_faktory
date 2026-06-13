@@ -1,3 +1,9 @@
+[faktory]
+# How long to retain dead jobs in the morgue before they are purged.
+# Accepts Go duration strings ("2160h") or day-based values ("180d").
+# Default: "180d"
+# dead_ttl = "180d"
+
 [queues]
 # disable backpressure by default
 backpressure = 0
