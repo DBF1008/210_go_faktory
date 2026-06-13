@@ -15,8 +15,12 @@ import (
 
 func TestManagerBasics(t *testing.T) {
 	t.Parallel()
-	assert.Equal(t, []string{"b", "c"}, filter([]string{"a"}, []string{"a", "b", "c"}))
-	assert.Equal(t, []string{"a"}, filter([]string{"c", "b"}, []string{"a", "b", "c"}))
+
+	ps := newPausedSet([]string{"a"})
+	assert.Equal(t, []string{"b", "c"}, ps.filterActive([]string{"a", "b", "c"}))
+
+	ps2 := newPausedSet([]string{"c", "b"})
+	assert.Equal(t, []string{"a"}, ps2.filterActive([]string{"a", "b", "c"}))
 }
 
 func TestManager(t *testing.T) {

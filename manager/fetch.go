@@ -8,7 +8,6 @@ import (
 	"github.com/contribsys/faktory/client"
 	"github.com/contribsys/faktory/util"
 	"github.com/redis/go-redis/v9"
-	"slices"
 )
 
 var (
@@ -25,7 +24,7 @@ func (m *manager) RemoveQueue(ctx context.Context, qName string) error {
 			return fmt.Errorf("cannot remove queue: %w", err)
 		}
 	}
-	m.paused = filter([]string{qName}, m.paused)
+	m.paused.remove(qName)
 	return nil
 }
 
@@ -36,7 +35,7 @@ func (m *manager) PauseQueue(ctx context.Context, qName string) error {
 		if err != nil {
 			return fmt.Errorf("cannot pause queue: %w", err)
 		}
-		m.paused = append(filter([]string{qName}, m.paused), qName)
+		m.paused.add(qName)
 	}
 	return nil
 }
@@ -49,31 +48,9 @@ func (m *manager) ResumeQueue(ctx context.Context, qName string) error {
 			return fmt.Errorf("cannot resume queue: %w", err)
 		}
 
-		m.paused = filter([]string{qName}, m.paused)
+		m.paused.remove(qName)
 	}
 	return nil
-}
-
-// returns the subset of "queues" which are not in "paused"
-func filter(paused []string, queues []string) []string {
-	if len(paused) == 0 {
-		return queues
-	}
-
-	qs := make([]string, len(queues))
-	count := 0
-
-	for qidx := range queues {
-		if !contains(queues[qidx], paused) {
-			qs[count] = queues[qidx]
-			count++
-		}
-	}
-	return qs[:count]
-}
-
-func contains(a string, slc []string) bool {
-	return slices.Contains(slc, a)
 }
 
 func (m *manager) Fetch(ctx context.Context, wid string, queues ...string) (*client.Job, error) {
@@ -82,7 +59,7 @@ func (m *manager) Fetch(ctx context.Context, wid string, queues ...string) (*cli
 	}
 
 restart:
-	activeQueues := filter(m.paused, queues)
+	activeQueues := m.paused.filterActive(queues)
 	if len(activeQueues) == 0 {
 		// if we pause all queues, there is nothing to fetch
 		select {
