@@ -11,7 +11,6 @@ import (
 	"github.com/contribsys/faktory/manager"
 	"github.com/contribsys/faktory/storage"
 	"github.com/contribsys/faktory/util"
-	"github.com/redis/go-redis/v9"
 )
 
 // A command responds to an client request.
@@ -89,7 +88,7 @@ func queueLatency(c *Connection, s *Server, cmd string, names []string) {
 		return
 	}
 
-	times, err := gatherLatencies(c.Context, names, s.Store())
+	times, err := s.Store().Latency(c.Context, names...)
 	if err != nil {
 		_ = c.Error(cmd, fmt.Errorf("QUEUE: %w", err))
 		return
@@ -101,44 +100,6 @@ func queueLatency(c *Connection, s *Server, cmd string, names []string) {
 	}
 
 	_ = c.Result(res)
-}
-
-func gatherLatencies(ctx context.Context, qs []string, store storage.Store) (map[string]float64, error) {
-	queueCmd := map[string]*redis.StringCmd{}
-	_, err := store.Redis().Pipelined(ctx, func(pipe redis.Pipeliner) error {
-		for _, q := range qs {
-			queueCmd[q] = pipe.LIndex(ctx, q, -1)
-		}
-		return nil
-	})
-	if err != nil && err != redis.Nil {
-		util.Error("Unable to gather queue latencies", err)
-		return nil, err
-	}
-
-	result := map[string]float64{}
-	for name, lindex := range queueCmd {
-		latency := 0.0
-		payload := lindex.Val()
-		if payload != "" {
-			var job client.Job
-			err := json.Unmarshal([]byte(payload), &job)
-			if err != nil {
-				return nil, err
-			} else {
-				tm, err := util.ParseTime(job.EnqueuedAt)
-				if err != nil {
-					return nil, err
-				} else {
-					latency = float64(time.Since(tm)) / float64(time.Second)
-				}
-			}
-			result[name] = latency
-		} else {
-			result[name] = 0
-		}
-	}
-	return result, nil
 }
 
 // FLUSH

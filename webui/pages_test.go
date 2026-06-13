@@ -75,6 +75,7 @@ func TestPages(t *testing.T) {
 		})
 
 		t.Run("Queues", func(t *testing.T) {
+			assert.NoError(t, s.Store().Flush(bg))
 			req, err := ui.NewRequest("GET", "http://localhost:7420/queues", nil)
 			assert.NoError(t, err)
 
@@ -85,14 +86,24 @@ func TestPages(t *testing.T) {
 			assert.NoError(t, err)
 			_, err = q.Clear(bg)
 			assert.NoError(t, err)
-			err = q.Push(bg, []byte("1l23j12l3"))
+
+			job := client.NewJob("SomeWorker", "1l23j12l3")
+			job.Queue = "foobar"
+			err = q.Add(bg, job)
 			assert.NoError(t, err)
 
 			w := httptest.NewRecorder()
 			queuesHandler(w, req)
 			assert.Equal(t, 200, w.Code)
-			assert.True(t, strings.Contains(w.Body.String(), "default"), w.Body.String())
-			assert.False(t, strings.Contains(w.Body.String(), "foobar"), w.Body.String())
+			body := w.Body.String()
+			assert.True(t, strings.Contains(body, "default"), body)
+			assert.True(t, strings.Contains(body, "foobar"), body)
+			// Verify the Latency column header is present
+			assert.True(t, strings.Contains(body, "Latency"), body)
+			// Empty queue renders the "-" placeholder with text-muted class
+			assert.True(t, strings.Contains(body, "text-muted"), body)
+			// Non-empty queue gets a real latency value with text-success class
+			assert.True(t, strings.Contains(body, "text-success"), body)
 		})
 
 		t.Run("Queue", func(t *testing.T) {

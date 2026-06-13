@@ -6,6 +6,7 @@ import (
 
 	"github.com/contribsys/faktory/client"
 	"github.com/contribsys/faktory/util"
+	"github.com/stretchr/testify/assert"
 )
 
 type testJob struct {
@@ -138,4 +139,38 @@ func TestActiveJobUnwrapping(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestFormatLatency(t *testing.T) {
+	cases := []struct {
+		name     string
+		secs     float64
+		expected string
+	}{
+		{"zero (empty queue)", 0, "-"},
+		{"sub-second", 0.3, "0.3s"},
+		{"few seconds", 5.7, "5.7s"},
+		{"just under a minute", 59.9, "59.9s"},
+		{"one minute", 60.0, "1m"},
+		{"minutes and seconds", 125.0, "2m 5s"},
+		{"exact minutes", 180.0, "3m"},
+		{"one hour", 3600.0, "1h"},
+		{"hours and minutes", 5400.0, "1h 30m"},
+		{"large value", 7260.0, "2h 1m"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.expected, formatLatency(tc.secs))
+		})
+	}
+}
+
+func TestCategoryForLatency(t *testing.T) {
+	assert.Equal(t, "muted", categoryForLatency(0))
+	assert.Equal(t, "success", categoryForLatency(0.5))
+	assert.Equal(t, "success", categoryForLatency(9.9))
+	assert.Equal(t, "warning", categoryForLatency(10))
+	assert.Equal(t, "warning", categoryForLatency(59.9))
+	assert.Equal(t, "danger", categoryForLatency(60))
+	assert.Equal(t, "danger", categoryForLatency(3600))
 }

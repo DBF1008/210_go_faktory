@@ -29,6 +29,10 @@ type Store interface {
 	EnqueueFrom(ctx context.Context, from SortedSet, data []byte) error
 	PausedQueues(ctx context.Context) ([]string, error)
 
+	// Latency returns the time in seconds the oldest job has been waiting in
+	// each named queue. An empty queue reports 0.
+	Latency(ctx context.Context, names ...string) (map[string]float64, error)
+
 	History(ctx context.Context, days int, fn func(day string, procCnt uint64, failCnt uint64)) error
 	Success(ctx context.Context) error
 	Failure(ctx context.Context) error

@@ -81,15 +81,28 @@ type Queue struct {
 	Name     string
 	Size     uint64
 	IsPaused bool
+	Latency  float64
 }
 
 func queues(req *http.Request) []Queue {
-	// ctx := req.Context()
 	c := req.Context()
-	queues := make([]Queue, 0)
 	s := ctx(req).Store()
 	pq, _ := s.PausedQueues(c)
 
+	// Collect all queue names first, then fetch latencies in a single
+	// pipelined round-trip to keep backend overhead acceptable.
+	names := make([]string, 0)
+	s.EachQueue(c, func(q storage.Queue) {
+		names = append(names, q.Name())
+	})
+
+	latencies, err := s.Latency(c, names...)
+	if err != nil {
+		util.Warnf("Unable to fetch queue latencies: %v", err)
+		latencies = map[string]float64{}
+	}
+
+	queues := make([]Queue, 0, len(names))
 	s.EachQueue(c, func(q storage.Queue) {
 		paused := false
 		for idx := range pq {
@@ -97,7 +110,8 @@ func queues(req *http.Request) []Queue {
 				paused = true
 			}
 		}
-		queues = append(queues, Queue{q.Name(), q.Size(c), paused})
+		lat := latencies[q.Name()]
+		queues = append(queues, Queue{q.Name(), q.Size(c), paused, lat})
 	})
 
 	sort.Slice(queues, func(i, j int) bool {
@@ -306,6 +320,50 @@ func category_for_rtt(lat float64) string {
 	} else {
 		return "danger"
 	}
+}
+
+// formatLatency renders a latency value (seconds) as a short human-readable
+// string. Zero is shown as a dash so empty queues don't look alarming.
+func formatLatency(secs float64) string {
+	if secs == 0 {
+		return "-"
+	}
+	d := time.Duration(secs * float64(time.Second))
+	if d < time.Second {
+		return fmt.Sprintf("%.1fs", secs)
+	}
+	if d < time.Minute {
+		return fmt.Sprintf("%.1fs", secs)
+	}
+	if d < time.Hour {
+		m := int(d.Minutes())
+		s := int(d.Seconds()) % 60
+		if s == 0 {
+			return fmt.Sprintf("%dm", m)
+		}
+		return fmt.Sprintf("%dm %ds", m, s)
+	}
+	h := int(d.Hours())
+	m := int(d.Minutes()) % 60
+	if m == 0 {
+		return fmt.Sprintf("%dh", h)
+	}
+	return fmt.Sprintf("%dh %dm", h, m)
+}
+
+// categoryForLatency returns a Bootstrap color class based on how long the
+// oldest job has been waiting. 0 is rendered as muted (empty queue).
+func categoryForLatency(secs float64) string {
+	if secs == 0 {
+		return "muted"
+	}
+	if secs < 10 {
+		return "success"
+	}
+	if secs < 60 {
+		return "warning"
+	}
+	return "danger"
 }
 
 func redis_info(req *http.Request) (string, float64) {

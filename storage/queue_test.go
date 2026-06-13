@@ -6,6 +6,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/contribsys/faktory/util"
 	"github.com/stretchr/testify/assert"
@@ -14,6 +15,43 @@ import (
 func TestBasicQueueOps(t *testing.T) {
 	withRedis(t, "queue", func(t *testing.T, store Store) {
 		bg := context.Background()
+
+		t.Run("Latency", func(t *testing.T) {
+			_ = store.Flush(bg)
+
+			// Empty queue should report 0 latency
+			q, err := store.GetQueue(bg, "default")
+			assert.NoError(t, err)
+			_, err = q.Clear(bg)
+			assert.NoError(t, err)
+
+			latencies, err := store.Latency(bg, "default")
+			assert.NoError(t, err)
+			assert.Equal(t, 0.0, latencies["default"])
+
+			// Push a job with a known enqueued_at in the past
+			jid := util.RandomJid()
+			pastTime := util.Thens(time.Now().Add(-5 * time.Second))
+			data := fmt.Appendf(nil, `{"jid":%q,"created_at":%q,"queue":"default","args":[],"class":"SomeWorker","enqueued_at":%q}`, jid, pastTime, pastTime)
+			err = q.Push(bg, data)
+			assert.NoError(t, err)
+
+			latencies, err = store.Latency(bg, "default")
+			assert.NoError(t, err)
+			assert.GreaterOrEqual(t, latencies["default"], 4.0) // at least ~5 seconds
+			assert.Less(t, latencies["default"], 30.0)          // but not too much
+
+			// Multiple queues at once
+			q2, err := store.GetQueue(bg, "critical")
+			assert.NoError(t, err)
+			_, err = q2.Clear(bg)
+			assert.NoError(t, err)
+
+			latencies, err = store.Latency(bg, "default", "critical")
+			assert.NoError(t, err)
+			assert.GreaterOrEqual(t, latencies["default"], 4.0)
+			assert.Equal(t, 0.0, latencies["critical"]) // empty queue
+		})
 
 		t.Run("Push", func(t *testing.T) {
 			_ = store.Flush(bg)

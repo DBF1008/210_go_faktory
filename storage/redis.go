@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
@@ -243,6 +244,44 @@ func (store *redisStore) Stats(ctx context.Context) map[string]string {
 
 func (store *redisStore) PausedQueues(ctx context.Context) ([]string, error) {
 	return store.rclient.SMembers(ctx, "paused").Result()
+}
+
+// Latency returns the time in seconds the oldest job has been waiting in each
+// named queue. Empty queues report 0.
+func (store *redisStore) Latency(ctx context.Context, names ...string) (map[string]float64, error) {
+	queueCmd := map[string]*redis.StringCmd{}
+	_, err := store.rclient.Pipelined(ctx, func(pipe redis.Pipeliner) error {
+		for _, q := range names {
+			queueCmd[q] = pipe.LIndex(ctx, q, -1)
+		}
+		return nil
+	})
+	if err != nil && err != redis.Nil {
+		util.Error("Unable to gather queue latencies", err)
+		return nil, err
+	}
+
+	result := map[string]float64{}
+	for name, lindex := range queueCmd {
+		latency := 0.0
+		payload := lindex.Val()
+		if payload != "" {
+			var job client.Job
+			err := json.Unmarshal([]byte(payload), &job)
+			if err != nil {
+				return nil, err
+			}
+			tm, err := util.ParseTime(job.EnqueuedAt)
+			if err != nil {
+				return nil, err
+			}
+			latency = float64(time.Since(tm)) / float64(time.Second)
+			result[name] = latency
+		} else {
+			result[name] = 0
+		}
+	}
+	return result, nil
 }
 
 // queues are iterated in sorted, lexigraphical order
