@@ -141,6 +141,21 @@ func (worker *ClientData) IsConsumer() bool {
 	return worker.Wid != ""
 }
 
+// snapshot returns an independent copy of the worker record that is safe to
+// read without holding the workers lock. The connections map is copied so its
+// size (ConnectionCount) is stable even if connections are added or reaped
+// afterwards. Callers MUST hold w.mu while calling this.
+func (worker *ClientData) snapshot() *ClientData {
+	dup := *worker
+	if worker.connections != nil {
+		dup.connections = make(map[io.Closer]bool, len(worker.connections))
+		for conn, ok := range worker.connections {
+			dup.connections[conn] = ok
+		}
+	}
+	return &dup
+}
+
 type workers struct {
 	heartbeats map[string]*ClientData
 	mu         sync.RWMutex
@@ -181,28 +196,28 @@ func (w *workers) setupHeartbeat(client *ClientData, cls io.Closer) (*ClientData
 }
 
 func (w *workers) heartbeat(client *ClientBeat) (*ClientData, bool) {
-	w.mu.RLock()
-	entry, ok := w.heartbeats[client.Wid]
-	w.mu.RUnlock()
+	w.mu.Lock()
+	defer w.mu.Unlock()
 
+	entry, ok := w.heartbeats[client.Wid]
 	if !ok {
 		return nil, ok
 	}
 
 	// util.Debugf("BEAT for %s", client.Wid)
 
-	newst := entry.state
-	if client.CurrentState != "" {
-		newst = stateFromString(client.CurrentState)
-	}
-	w.mu.Lock()
 	entry.RssKb = client.RssKb
 	entry.lastHeartbeat = time.Now()
-	if entry.state != newst {
-		entry.Signal(newst)
+	if client.CurrentState != "" {
+		newst := stateFromString(client.CurrentState)
+		if entry.state != newst {
+			entry.Signal(newst)
+		}
 	}
-	w.mu.Unlock()
-	return entry, ok
+
+	// Return an independent snapshot so the caller (the BEAT reply) can read
+	// worker state without racing concurrent heartbeats or UI signals.
+	return entry.snapshot(), ok
 }
 
 func (w *workers) RemoveConnection(c *Connection) {
@@ -250,4 +265,37 @@ func (w *workers) reapHeartbeats(t time.Time) int {
 		}
 	}
 	return count
+}
+
+// BusyState returns a point-in-time snapshot of every known worker process.
+// Each returned ClientData is an independent copy, so the caller may read it
+// freely while heartbeats, reaping, and signals continue concurrently. This
+// is the concurrency-safe way to observe worker state for the Busy page.
+func (w *workers) BusyState() []*ClientData {
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+
+	state := make([]*ClientData, 0, len(w.heartbeats))
+	for _, entry := range w.heartbeats {
+		state = append(state, entry.snapshot())
+	}
+	return state
+}
+
+// SignalState delivers a quiet/terminate signal to the worker(s) matching wid,
+// where "all" matches every worker. It returns the number of worker processes
+// signaled. The live records are mutated under the lock so concurrent readers
+// (BusyState) and heartbeats always observe a consistent state.
+func (w *workers) SignalState(wid string, state WorkerState) int {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	signaled := 0
+	for _, entry := range w.heartbeats {
+		if wid == "all" || wid == entry.Wid {
+			entry.Signal(state)
+			signaled++
+		}
+	}
+	return signaled
 }

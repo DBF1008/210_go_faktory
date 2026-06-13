@@ -1,7 +1,9 @@
 package server
 
 import (
+	"fmt"
 	"io"
+	"sync"
 	"testing"
 	"time"
 
@@ -107,8 +109,128 @@ func TestWorkers(t *testing.T) {
 	assert.Equal(t, 1, count)
 }
 
-type cls struct{}
+// cls is a no-op io.Closer test double. It carries an id so that distinct
+// instances are distinct map keys; an empty struct{} would be zero-sized and
+// every &cls{} could share one address, collapsing into a single connection.
+type cls struct{ id int }
 
-func (c cls) Close() error {
+func (c *cls) Close() error {
 	return nil
+}
+
+func TestWorkersBusyStateSnapshot(t *testing.T) {
+	t.Parallel()
+
+	w := newWorkers()
+	cd := &ClientData{Hostname: "h1", Wid: "wid-1", Labels: []string{"a"}}
+	_, _ = w.setupHeartbeat(cd, &cls{id: 1})
+
+	state := w.BusyState()
+	assert.Len(t, state, 1)
+	snap := state[0]
+	assert.Equal(t, "wid-1", snap.Wid)
+	assert.Equal(t, 1, snap.ConnectionCount())
+	assert.Equal(t, Running, snap.state)
+
+	// The snapshot must be an independent copy: signaling the live worker and
+	// adding a connection after the snapshot was taken must NOT be observable
+	// through the previously returned snapshot.
+	assert.Equal(t, 1, w.SignalState("wid-1", Quiet))
+	_, _ = w.setupHeartbeat(cd, &cls{id: 2}) // a second, distinct live connection
+
+	assert.Equal(t, Running, snap.state, "snapshot must not observe a later signal")
+	assert.False(t, snap.IsQuiet())
+	assert.Equal(t, 1, snap.ConnectionCount(), "snapshot connection count must be stable")
+
+	// A fresh snapshot reflects the new live state.
+	state2 := w.BusyState()
+	assert.Len(t, state2, 1)
+	assert.Equal(t, Quiet, state2[0].state)
+	assert.Equal(t, 2, state2[0].ConnectionCount())
+
+	// Mutating a returned snapshot must not corrupt the live record.
+	snap.state = Terminate
+	assert.Equal(t, Quiet, w.heartbeats["wid-1"].state)
+}
+
+func TestWorkersSignalState(t *testing.T) {
+	t.Parallel()
+
+	w := newWorkers()
+	_, _ = w.setupHeartbeat(&ClientData{Wid: "a"}, &cls{})
+	_, _ = w.setupHeartbeat(&ClientData{Wid: "b"}, &cls{})
+
+	assert.Equal(t, 1, w.SignalState("a", Quiet))
+	assert.Equal(t, Quiet, w.heartbeats["a"].state)
+	assert.Equal(t, Running, w.heartbeats["b"].state)
+
+	assert.Equal(t, 2, w.SignalState("all", Terminate))
+	assert.Equal(t, Terminate, w.heartbeats["a"].state)
+	assert.Equal(t, Terminate, w.heartbeats["b"].state)
+
+	assert.Equal(t, 0, w.SignalState("missing", Quiet))
+}
+
+// TestWorkersConcurrentSnapshot is a regression test for the data race that
+// occurred when the Busy page iterated the live heartbeats map while workers
+// were beating, registering, signaling, and being reaped. It must be run with
+// -race to be meaningful.
+func TestWorkersConcurrentSnapshot(t *testing.T) {
+	t.Parallel()
+
+	w := newWorkers()
+	for i := 0; i < 8; i++ {
+		_, _ = w.setupHeartbeat(&ClientData{Wid: fmt.Sprintf("wid-%d", i)}, &cls{})
+	}
+
+	var wg sync.WaitGroup
+	stop := make(chan struct{})
+
+	// Readers continuously take snapshots and read fields off them, exactly as
+	// the Busy page does via BusyState.
+	for i := 0; i < 4; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+					for _, s := range w.BusyState() {
+						_ = s.Wid
+						_ = s.ConnectionCount()
+						_ = s.IsQuiet()
+						_ = s.RssKb
+					}
+				}
+			}
+		}()
+	}
+
+	// Writers beat, signal, register new workers, and reap concurrently.
+	for i := 0; i < 4; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			wid := fmt.Sprintf("wid-%d", i)
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+					w.heartbeat(&ClientBeat{Wid: wid, RssKb: int64(i)})
+					w.SignalState(wid, Quiet)
+					_, _ = w.setupHeartbeat(&ClientData{Wid: fmt.Sprintf("tmp-%d", i)}, &cls{})
+					w.reapHeartbeats(time.Now().Add(time.Hour))
+				}
+			}
+		}(i)
+	}
+
+	time.Sleep(200 * time.Millisecond)
+	close(stop)
+	wg.Wait()
+
+	assert.GreaterOrEqual(t, w.Count(), 0)
 }

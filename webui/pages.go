@@ -366,11 +366,7 @@ func busyHandler(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 
-			for _, client := range ctx(r).Server().Heartbeats() {
-				if wid == "all" || wid == client.Wid {
-					client.Signal(signal)
-				}
-			}
+			ctx(r).Server().SignalState(wid, signal)
 		}
 		Redirect(w, r, "/busy", http.StatusFound)
 		return

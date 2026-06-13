@@ -108,8 +108,23 @@ func NewServer(opts *ServerOptions) (*Server, error) {
 	return s, nil
 }
 
+// Heartbeats exposes the raw, live worker map. It is retained for tests and
+// low-level callers; concurrency-safe consumers should prefer BusyState and
+// SignalState, which never hand out references to the live worker records.
 func (s *Server) Heartbeats() map[string]*ClientData {
 	return s.workers.heartbeats
+}
+
+// BusyState returns a concurrency-safe snapshot of all worker processes for
+// display (e.g. the Busy page). Each returned ClientData is an independent copy.
+func (s *Server) BusyState() []*ClientData {
+	return s.workers.BusyState()
+}
+
+// SignalState safely delivers a quiet/terminate signal to the worker(s)
+// matching wid ("all" matches every worker), returning the number signaled.
+func (s *Server) SignalState(wid string, state WorkerState) int {
+	return s.workers.SignalState(wid, state)
 }
 
 func (s *Server) Store() storage.Store {
