@@ -1,0 +1,25 @@
+<%= title %>
+
+Notable changes can be found in the changelogs:
+
+* [Faktory](https://github.com/contribsys/faktory/blob/main/Changes.md#<%= shortver %>)
+* [Faktory Enterprise](https://github.com/contribsys/faktory/blob/main/Ent-Changes.md#<%= shortver %>)
+
+| Filename | SHA256 |
+| --- | --- |
+<% sums.keys.grep_v(/faktory-[ep]/).sort.each do |filename| -%>
+| <%= filename %> | <%= sums[filename] %> |
+<% end -%>
+<% sums.keys.grep(/faktory-[ep]/).sort.each do |filename| -%>
+| <%= filename %> | <%= sums[filename] %> |
+<% end -%>
+
+Verify with `shasum -a 256 <filename>`.
+
+[Installation](https://github.com/contribsys/faktory/wiki/Installation) | [Full docs](https://github.com/contribsys/faktory/wiki/)
+
+The Faktory Enterprise macOS packages are bare binaries which can replace the `faktory` binary installed by Homebrew. You are welcome to use either to trial the commercial functionality before purchase but they may not be used in a `production` environment without a license. Linux DEB packages and Docker images are available upon [purchase](https://contribsys.com/faktory).
+
+Unpack them with `tar xvf faktory-ent-*.tbz; cp ./faktory /usr/local/bin`.
+
+Note the `amd64` builds are for x86_64 processors (Intel, AMD). `arm64` builds are for ARM (Gravitron, Apple Silicon, etc) processors.
