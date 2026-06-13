@@ -91,6 +91,18 @@ func (m *manager) loadWorkingSet(ctx context.Context) error {
 			util.Error("Unable to restore working job", err)
 			return nil
 		}
+
+		// The internal time fields are not part of the JSON payload, so we
+		// rehydrate them from their serialized string form. Without this a
+		// restored reservation carries a zero Since/Expiry, leaving ACK,
+		// extension and expiry handling to work off a stale snapshot.
+		if res.tsince, err = util.ParseTime(res.Since); err != nil {
+			util.Warnf("Unable to parse reserved_at %q for job %s: %v", res.Since, res.Job.Jid, err)
+		}
+		if res.texpiry, err = util.ParseTime(res.Expiry); err != nil {
+			util.Warnf("Unable to parse expires_at %q for job %s: %v", res.Expiry, res.Job.Jid, err)
+		}
+
 		m.workingMap[res.Job.Jid] = &res
 		addedCount++
 		return nil
@@ -209,11 +221,23 @@ func (m *manager) ReapExpiredJobs(ctx context.Context, when time.Time) (int64, e
 			// the latest deadline in memory and extend the
 			// reservation when it expires, in this method.
 			if ok && when.Before(localres.extension) {
+				// Persist the *updated* reservation. The sorted-set score and the
+				// expires_at embedded in the stored payload must agree: a later
+				// restart reloads Expiry from the payload, and ACK/expiry lookups
+				// key off that timestamp, so reusing the stale payload here would
+				// leave them targeting the old score after a restart.
+				m.workingMutex.Lock()
 				localres.texpiry = localres.extension
-				localres.Expiry = util.Thens(localres.extension)
-				util.Debugf("Auto-extending reservation time for %s to %s", jid, localres.Expiry)
-				err = m.store.Working().AddElement(ctx, localres.Expiry, jid, data)
-				if err != nil {
+				expiry := util.Thens(localres.extension)
+				localres.Expiry = expiry
+				newData, merr := json.Marshal(localres)
+				m.workingMutex.Unlock()
+				if merr != nil {
+					return fmt.Errorf("cannot marshal extended reservation for %q job: %w", jid, merr)
+				}
+
+				util.Debugf("Auto-extending reservation time for %s to %s", jid, expiry)
+				if err = m.store.Working().AddElement(ctx, expiry, jid, newData); err != nil {
 					return fmt.Errorf("cannot extend reservation for %q job: %w", jid, err)
 				}
 				return nil
