@@ -3,6 +3,7 @@ package manager
 import (
 	"context"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/contribsys/faktory/client"
@@ -25,7 +26,7 @@ func (m *manager) RemoveQueue(ctx context.Context, qName string) error {
 			return fmt.Errorf("cannot remove queue: %w", err)
 		}
 	}
-	m.paused = filter([]string{qName}, m.paused)
+	m.paused.unpause(qName)
 	return nil
 }
 
@@ -36,7 +37,7 @@ func (m *manager) PauseQueue(ctx context.Context, qName string) error {
 		if err != nil {
 			return fmt.Errorf("cannot pause queue: %w", err)
 		}
-		m.paused = append(filter([]string{qName}, m.paused), qName)
+		m.paused.pause(qName)
 	}
 	return nil
 }
@@ -49,7 +50,7 @@ func (m *manager) ResumeQueue(ctx context.Context, qName string) error {
 			return fmt.Errorf("cannot resume queue: %w", err)
 		}
 
-		m.paused = filter([]string{qName}, m.paused)
+		m.paused.unpause(qName)
 	}
 	return nil
 }
@@ -76,13 +77,59 @@ func contains(a string, slc []string) bool {
 	return slices.Contains(slc, a)
 }
 
+// pausedQueues is a concurrency-safe set of paused queue names.
+//
+// All access goes through its methods, which serialize reads and writes with a
+// single RWMutex. Writers always replace the backing slice with a freshly built
+// one rather than mutating it in place, and the set never contains duplicates.
+// This guarantees that readers observe a consistent snapshot of the paused set:
+// the slice handed to a reader is never concurrently mutated and never reflects
+// a half-applied update.
+type pausedQueues struct {
+	mu    sync.RWMutex
+	names []string
+}
+
+// load replaces the entire set, used to seed the in-memory state from storage.
+func (p *pausedQueues) load(names []string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.names = names
+}
+
+// pause adds qName to the set. It is idempotent: pausing an already-paused
+// queue does not create a duplicate entry.
+func (p *pausedQueues) pause(qName string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.names = append(filter([]string{qName}, p.names), qName)
+}
+
+// unpause removes qName from the set, if present. It is used for both resuming
+// and removing a queue, since either way the queue is no longer paused.
+func (p *pausedQueues) unpause(qName string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.names = filter([]string{qName}, p.names)
+}
+
+// activeQueues returns the subset of queues that are not currently paused. The
+// result is computed while holding the read lock and is a snapshot: it shares
+// no backing storage with the paused set, so it remains valid even if the set
+// changes immediately afterwards.
+func (p *pausedQueues) activeQueues(queues []string) []string {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return filter(p.names, queues)
+}
+
 func (m *manager) Fetch(ctx context.Context, wid string, queues ...string) (*client.Job, error) {
 	if len(queues) == 0 {
 		return nil, fmt.Errorf("must call fetch with at least one queue")
 	}
 
 restart:
-	activeQueues := filter(m.paused, queues)
+	activeQueues := m.paused.activeQueues(queues)
 	if len(activeQueues) == 0 {
 		// if we pause all queues, there is nothing to fetch
 		select {

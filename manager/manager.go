@@ -133,7 +133,7 @@ func newManager(s storage.Store) *manager {
 	ctx := context.Background()
 	_ = m.loadWorkingSet(ctx)
 	p, _ := s.PausedQueues(ctx)
-	m.paused = p
+	m.paused.load(p)
 	m.fetcher = BasicFetcher(m.Redis())
 	return m
 }
@@ -185,7 +185,7 @@ type manager struct {
 	fetchChain   MiddlewareChain
 	failChain    MiddlewareChain
 	ackChain     MiddlewareChain
-	paused       []string
+	paused       pausedQueues
 	workingMutex sync.RWMutex
 }
 

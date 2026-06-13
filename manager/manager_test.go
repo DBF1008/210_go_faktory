@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"sync"
 	"testing"
 	"time"
 
@@ -17,6 +18,107 @@ func TestManagerBasics(t *testing.T) {
 	t.Parallel()
 	assert.Equal(t, []string{"b", "c"}, filter([]string{"a"}, []string{"a", "b", "c"}))
 	assert.Equal(t, []string{"a"}, filter([]string{"c", "b"}, []string{"a", "b", "c"}))
+}
+
+func TestPausedQueues(t *testing.T) {
+	t.Parallel()
+
+	var p pausedQueues
+	all := []string{"a", "b", "c"}
+
+	// Nothing is paused initially, so every queue is active.
+	assert.Equal(t, all, p.activeQueues(all))
+
+	// Pausing a queue removes it from the active set.
+	p.pause("a")
+	assert.Equal(t, []string{"b", "c"}, p.activeQueues(all))
+
+	// Pausing the same queue again is idempotent: no duplicate entries.
+	p.pause("a")
+	assert.Equal(t, []string{"b", "c"}, p.activeQueues(all))
+	assert.ElementsMatch(t, []string{"a"}, p.names)
+
+	// A second paused queue is also filtered out.
+	p.pause("b")
+	assert.Equal(t, []string{"c"}, p.activeQueues(all))
+	assert.ElementsMatch(t, []string{"a", "b"}, p.names)
+
+	// Unpausing brings a queue back into the active set.
+	p.unpause("a")
+	assert.Equal(t, []string{"a", "c"}, p.activeQueues(all))
+
+	// Unpausing a queue that is not paused is a no-op.
+	p.unpause("never-paused")
+	assert.Equal(t, []string{"a", "c"}, p.activeQueues(all))
+
+	p.unpause("b")
+	assert.Equal(t, all, p.activeQueues(all))
+	assert.Empty(t, p.names)
+
+	// load replaces the entire set, as done when seeding from storage.
+	p.load([]string{"x", "y"})
+	assert.Equal(t, []string{"z"}, p.activeQueues([]string{"x", "y", "z"}))
+}
+
+// TestPausedQueuesSnapshot verifies that the slice returned by activeQueues is a
+// stable snapshot: mutating the paused set afterwards must not change a result a
+// reader already holds.
+func TestPausedQueuesSnapshot(t *testing.T) {
+	t.Parallel()
+
+	var p pausedQueues
+	all := []string{"a", "b", "c"}
+
+	p.pause("b")
+	snapshot := p.activeQueues(all)
+	assert.Equal(t, []string{"a", "c"}, snapshot)
+
+	// Pause the remaining queues after the snapshot was taken.
+	p.pause("a")
+	p.pause("c")
+
+	assert.Equal(t, []string{"a", "c"}, snapshot, "previously returned active queues must be a stable snapshot")
+	assert.Empty(t, p.activeQueues(all), "a fresh read reflects the now fully-paused set")
+}
+
+// TestPausedQueuesConcurrent hammers the paused set from many goroutines while
+// reading it concurrently. Run with -race to detect data races; the final
+// assertion verifies the no-duplicate invariant survives concurrent mutation.
+func TestPausedQueuesConcurrent(t *testing.T) {
+	t.Parallel()
+
+	var p pausedQueues
+	queues := []string{"q0", "q1", "q2", "q3", "q4", "q5", "q6", "q7", "q8", "q9"}
+
+	const goroutines = 50
+	const iterations = 500
+
+	var wg sync.WaitGroup
+	wg.Add(goroutines)
+	for g := 0; g < goroutines; g++ {
+		go func(g int) {
+			defer wg.Done()
+			for i := 0; i < iterations; i++ {
+				q := queues[(g+i)%len(queues)]
+				if i%2 == 0 {
+					p.pause(q)
+				} else {
+					p.unpause(q)
+				}
+				// Reads must never observe a torn or oversized snapshot.
+				if active := p.activeQueues(queues); len(active) > len(queues) {
+					t.Errorf("active queues %v larger than input %v", active, queues)
+				}
+			}
+		}(g)
+	}
+	wg.Wait()
+
+	seen := map[string]bool{}
+	for _, q := range p.names {
+		assert.Falsef(t, seen[q], "duplicate queue %q in paused set %v", q, p.names)
+		seen[q] = true
+	}
 }
 
 func TestManager(t *testing.T) {
