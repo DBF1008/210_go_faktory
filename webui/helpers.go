@@ -81,6 +81,7 @@ type Queue struct {
 	Name     string
 	Size     uint64
 	IsPaused bool
+	Latency  float64
 }
 
 func queues(req *http.Request) []Queue {
@@ -90,6 +91,7 @@ func queues(req *http.Request) []Queue {
 	s := ctx(req).Store()
 	pq, _ := s.PausedQueues(c)
 
+	names := make([]string, 0)
 	s.EachQueue(c, func(q storage.Queue) {
 		paused := false
 		for idx := range pq {
@@ -97,8 +99,23 @@ func queues(req *http.Request) []Queue {
 				paused = true
 			}
 		}
-		queues = append(queues, Queue{q.Name(), q.Size(c), paused})
+		queues = append(queues, Queue{Name: q.Name(), Size: q.Size(c), IsPaused: paused})
+		names = append(names, q.Name())
 	})
+
+	// Fetch the latency of every queue in a single pipelined round-trip so the
+	// added overhead stays constant regardless of how many queues exist. If the
+	// lookup fails we still render the page with the latencies left at zero.
+	if len(names) > 0 {
+		latencies, err := server.GatherLatencies(c, names, s)
+		if err != nil {
+			util.Warnf("Unable to gather queue latencies: %v", err)
+		} else {
+			for idx := range queues {
+				queues[idx].Latency = latencies[queues[idx].Name]
+			}
+		}
+	}
 
 	sort.Slice(queues, func(i, j int) bool {
 		return queues[i].Name < queues[j].Name
@@ -294,6 +311,17 @@ func displayRss(rssKb int64) string {
 	} else {
 		return strconv.FormatFloat(float64(rssKb)/(1024*1024), 'f', 1, 64) + " GB"
 	}
+}
+
+// displayLatency renders a queue latency (in seconds) into a compact,
+// human-readable string, scaling the unit so large backlogs stay legible.
+func displayLatency(latency float64) string {
+	if latency < 60 {
+		return fmt.Sprintf("%.2f s", latency)
+	} else if latency < 3600 {
+		return fmt.Sprintf("%.1f m", latency/60)
+	}
+	return fmt.Sprintf("%.1f h", latency/3600)
 }
 
 func category_for_rtt(lat float64) string {

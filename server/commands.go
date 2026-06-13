@@ -89,7 +89,7 @@ func queueLatency(c *Connection, s *Server, cmd string, names []string) {
 		return
 	}
 
-	times, err := gatherLatencies(c.Context, names, s.Store())
+	times, err := GatherLatencies(c.Context, names, s.Store())
 	if err != nil {
 		_ = c.Error(cmd, fmt.Errorf("QUEUE: %w", err))
 		return
@@ -103,7 +103,11 @@ func queueLatency(c *Connection, s *Server, cmd string, names []string) {
 	_ = c.Result(res)
 }
 
-func gatherLatencies(ctx context.Context, qs []string, store storage.Store) (map[string]float64, error) {
+// GatherLatencies computes the latency, in seconds, of the oldest job currently
+// enqueued in each of the named queues. It issues a single pipelined LINDEX per
+// queue so the whole batch costs one Redis round-trip. A latency of 0 means the
+// queue is empty. It is reused by both the QUEUE LATENCY command and the Web UI.
+func GatherLatencies(ctx context.Context, qs []string, store storage.Store) (map[string]float64, error) {
 	queueCmd := map[string]*redis.StringCmd{}
 	_, err := store.Redis().Pipelined(ctx, func(pipe redis.Pipeliner) error {
 		for _, q := range qs {

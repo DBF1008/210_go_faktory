@@ -33,6 +33,10 @@ func ego_listQueues(w io.Writer, req *http.Request) {
 //line queues.ego:17
 		_, _ = io.WriteString(w, "</th>\n      <th>")
 //line queues.ego:18
+		_, _ = io.WriteString(w, html.EscapeString(fmt.Sprint(t(req, "Latency"))))
+//line queues.ego:18
+		_, _ = io.WriteString(w, "</th>\n      <th>")
+//line queues.ego:19
 		_, _ = io.WriteString(w, html.EscapeString(fmt.Sprint(t(req, "Actions"))))
 //line queues.ego:18
 		_, _ = io.WriteString(w, "</th>\n    </thead>\n    ")
@@ -54,7 +58,11 @@ func ego_listQueues(w io.Writer, req *http.Request) {
 			_, _ = io.WriteString(w, "</a>\n        </td>\n        <td>")
 //line queues.ego:25
 			_, _ = io.WriteString(w, html.EscapeString(fmt.Sprint(uintWithDelimiter(queue.Size))))
-//line queues.ego:25
+//line queues.ego:26
+			_, _ = io.WriteString(w, "</td>\n        <td>")
+//line queues.ego:26
+			_, _ = io.WriteString(w, html.EscapeString(fmt.Sprint(displayLatency(queue.Latency))))
+//line queues.ego:26
 			_, _ = io.WriteString(w, "</td>\n        <td class=\"delete-confirm\">\n          <form action=\"")
 //line queues.ego:27
 			_, _ = io.WriteString(w, html.EscapeString(fmt.Sprint(root(req))))

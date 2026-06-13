@@ -489,3 +489,59 @@ func (ui *WebUI) NewRequest(method string, urlstr string, body io.Reader) (*http
 	}
 	return r.WithContext(dctx), nil
 }
+
+func TestQueueLatency(t *testing.T) {
+	bootRuntime(t, "latency", func(ui *WebUI, s *server.Server, t *testing.T) {
+		bg := context.Background()
+		str := s.Store()
+
+		// Register a fresh, empty queue so EachQueue will surface it.
+		q, err := str.GetQueue(bg, "lat_test")
+		assert.NoError(t, err)
+		assert.EqualValues(t, 0, q.Size(bg))
+
+		// Push a single job enqueued 30s ago. Because the queue is otherwise
+		// empty this job is the list tail, which is exactly what
+		// GatherLatencies inspects via LINDEX -1.
+		enq := util.Thens(time.Now().Add(-30 * time.Second))
+		payload := fmt.Appendf(nil, `{"jid":"%s","jobtype":"SomeWorker","queue":"lat_test","args":[1],"created_at":"%s","enqueued_at":"%s"}`,
+			util.RandomJid(), enq, enq)
+		assert.NoError(t, q.Push(bg, payload))
+		assert.EqualValues(t, 1, q.Size(bg))
+
+		req, err := ui.NewRequest("GET", "http://localhost:7420/queues", nil)
+		assert.NoError(t, err)
+
+		// queues() should attach the latency of the oldest job to the matching entry.
+		qs := queues(req)
+		var found *Queue
+		for i := range qs {
+			if qs[i].Name == "lat_test" {
+				found = &qs[i]
+			}
+		}
+		assert.NotNil(t, found)
+		assert.EqualValues(t, 1, found.Size)
+		assert.GreaterOrEqual(t, found.Latency, 29.0)
+		assert.Less(t, found.Latency, 120.0)
+
+		// An empty queue should report zero latency rather than an error.
+		empty, err := str.GetQueue(bg, "lat_empty")
+		assert.NoError(t, err)
+		assert.EqualValues(t, 0, empty.Size(bg))
+		qs = queues(req)
+		for i := range qs {
+			if qs[i].Name == "lat_empty" {
+				assert.EqualValues(t, 0, qs[i].Latency)
+			}
+		}
+
+		// The page itself should render the new Latency column for the queue.
+		w := httptest.NewRecorder()
+		queuesHandler(w, req)
+		assert.Equal(t, 200, w.Code)
+		body := w.Body.String()
+		assert.True(t, strings.Contains(body, "lat_test"), body)
+		assert.True(t, strings.Contains(body, "Latency"), body)
+	})
+}

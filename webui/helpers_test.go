@@ -139,3 +139,24 @@ func TestActiveJobUnwrapping(t *testing.T) {
 		})
 	}
 }
+
+func TestDisplayLatency(t *testing.T) {
+	cases := []struct {
+		latency  float64
+		expected string
+	}{
+		{0, "0.00 s"},
+		{5.5, "5.50 s"},
+		{59.99, "59.99 s"},
+		{60, "1.0 m"},
+		{90, "1.5 m"},
+		{3599, "60.0 m"},
+		{3600, "1.0 h"},
+		{7200, "2.0 h"},
+	}
+	for _, tc := range cases {
+		if got := displayLatency(tc.latency); got != tc.expected {
+			t.Errorf("displayLatency(%v) = %q, want %q", tc.latency, got, tc.expected)
+		}
+	}
+}
