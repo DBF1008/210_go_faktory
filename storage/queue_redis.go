@@ -104,6 +104,23 @@ func (q *redisQueue) Push(ctx context.Context, payload []byte) error {
 	return q.store.rclient.LPush(ctx, q.name, payload).Err()
 }
 
+// AddBulk enqueues multiple pre-serialized job payloads using a single
+// variadic LPUSH, collapsing what would otherwise be N roundtrips into one.
+// Repeated Push calls of p0, p1, p2 leave the list as [p2, p1, p0] and RPOP
+// returns p0 first; a single LPUSH of the same ordered slice yields the
+// identical layout, so FIFO ordering is unchanged.
+func (q *redisQueue) AddBulk(ctx context.Context, payloads [][]byte) error {
+	if len(payloads) == 0 {
+		return nil
+	}
+
+	args := make([]interface{}, len(payloads))
+	for idx := range payloads {
+		args[idx] = payloads[idx]
+	}
+	return q.store.rclient.LPush(ctx, q.name, args...).Err()
+}
+
 // non-blocking, returns immediately if there's nothing enqueued
 func (q *redisQueue) Pop(ctx context.Context) ([]byte, error) {
 	if q.done {

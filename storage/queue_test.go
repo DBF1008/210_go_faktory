@@ -179,3 +179,65 @@ func fakeJob() (string, []byte) {
 	nows := util.Nows()
 	return jid, fmt.Appendf(nil, `{"jid":%q,"created_at":%q,"queue":"default","args":[1,2,3],"class":"SomeWorker"}`, jid, nows)
 }
+
+func TestQueueAddBulk(t *testing.T) {
+	withRedis(t, "addbulk", func(t *testing.T, store Store) {
+		bg := context.Background()
+
+		t.Run("EmptyIsNoop", func(t *testing.T) {
+			_ = store.Flush(bg)
+			q, err := store.GetQueue(bg, "default")
+			assert.NoError(t, err)
+
+			assert.NoError(t, q.AddBulk(bg, nil))
+			assert.NoError(t, q.AddBulk(bg, [][]byte{}))
+			assert.EqualValues(t, 0, q.Size(bg))
+		})
+
+		t.Run("PreservesOrder", func(t *testing.T) {
+			_ = store.Flush(bg)
+			q, err := store.GetQueue(bg, "default")
+			assert.NoError(t, err)
+
+			payloads := [][]byte{
+				[]byte("a"),
+				[]byte("b"),
+				[]byte("c"),
+			}
+			err = q.AddBulk(bg, payloads)
+			assert.NoError(t, err)
+			assert.EqualValues(t, 3, q.Size(bg))
+
+			// Pop returns them in submission order (FIFO), matching repeated Push.
+			for _, want := range []string{"a", "b", "c"} {
+				data, err := q.Pop(bg)
+				assert.NoError(t, err)
+				assert.Equal(t, want, string(data))
+			}
+		})
+
+		t.Run("MatchesRepeatedPush", func(t *testing.T) {
+			_ = store.Flush(bg)
+			bulkQ, err := store.GetQueue(bg, "bulkq")
+			assert.NoError(t, err)
+			loopQ, err := store.GetQueue(bg, "loopq")
+			assert.NoError(t, err)
+
+			vals := [][]byte{[]byte("1"), []byte("2"), []byte("3"), []byte("4")}
+
+			assert.NoError(t, bulkQ.AddBulk(bg, vals))
+			for _, v := range vals {
+				assert.NoError(t, loopQ.Push(bg, v))
+			}
+
+			assert.EqualValues(t, loopQ.Size(bg), bulkQ.Size(bg))
+			for range vals {
+				viaBulk, err := bulkQ.Pop(bg)
+				assert.NoError(t, err)
+				viaLoop, err := loopQ.Pop(bg)
+				assert.NoError(t, err)
+				assert.Equal(t, viaLoop, viaBulk)
+			}
+		})
+	})
+}

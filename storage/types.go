@@ -57,6 +57,9 @@ type Queue interface {
 
 	Add(ctx context.Context, job *client.Job) error
 	Push(ctx context.Context, data []byte) error
+	// AddBulk enqueues several pre-serialized payloads in a single roundtrip.
+	// Order is preserved: payloads[0] is dequeued before payloads[1].
+	AddBulk(ctx context.Context, payloads [][]byte) error
 
 	Pop(ctx context.Context) ([]byte, error)
 	BPop(ctx context.Context) ([]byte, error)

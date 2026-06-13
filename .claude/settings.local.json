@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(GOPROXY=off GOFLAGS=-mod=mod /home/bufan/go/bin/go vet ./storage/... ./manager/... ./server/...)",
+      "Bash(echo \"VET_EXIT=$PIPESTATUS[0]\")"
+    ]
+  }
+}

@@ -173,11 +173,10 @@ func pushBulk(c *Connection, s *Server, cmd string) {
 		return
 	}
 
-	result := map[string]string{}
 	ts := util.Nows()
-
+	refs := make([]*client.Job, len(jobs))
 	for idx := range jobs {
-		job := jobs[idx]
+		job := &jobs[idx]
 		// caller can leave out the CreatedAt element
 		if job.CreatedAt == "" {
 			job.CreatedAt = ts
@@ -186,17 +185,23 @@ func pushBulk(c *Connection, s *Server, cmd string) {
 			// If retry is not set, we want to use the default policy
 			job.Retry = &client.RetryPolicyDefault
 		}
-		// TODO we aren't optimizing the roundtrips to Redis yet
-		// We need a new `manager.PushBulk` API
-		err = s.manager.Push(c.Context, &job)
-		if err != nil {
-			result[job.Jid] = err.Error()
-		}
+		refs[idx] = job
 	}
 
-	if len(result) == 0 {
+	failures, err := s.manager.PushBulk(c.Context, refs)
+	if err != nil {
+		_ = c.Error(cmd, fmt.Errorf("PUSHB: %w", err))
+		return
+	}
+
+	if len(failures) == 0 {
 		_ = c.Result([]byte("{}"))
 		return
+	}
+
+	result := make(map[string]string, len(failures))
+	for jid, ferr := range failures {
+		result[jid] = ferr.Error()
 	}
 	res, err := json.Marshal(result)
 	if err != nil {
