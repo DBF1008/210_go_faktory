@@ -104,6 +104,19 @@ func (q *redisQueue) Push(ctx context.Context, payload []byte) error {
 	return q.store.rclient.LPush(ctx, q.name, payload).Err()
 }
 
+func (q *redisQueue) PushBulk(ctx context.Context, payloads [][]byte) error {
+	if len(payloads) == 0 {
+		return nil
+	}
+	_, err := q.store.rclient.Pipelined(ctx, func(pipe redis.Pipeliner) error {
+		for _, payload := range payloads {
+			pipe.LPush(ctx, q.name, payload)
+		}
+		return nil
+	})
+	return err
+}
+
 // non-blocking, returns immediately if there's nothing enqueued
 func (q *redisQueue) Pop(ctx context.Context) ([]byte, error) {
 	if q.done {

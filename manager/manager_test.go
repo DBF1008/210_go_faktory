@@ -158,6 +158,139 @@ func TestManager(t *testing.T) {
 			assert.Empty(t, job.EnqueuedAt)
 		})
 
+		t.Run("PushBulk", func(t *testing.T) {
+			assert.NoError(t, store.Flush(bg))
+			m := NewManager(store)
+
+			q, err := store.GetQueue(bg, "default")
+			assert.NoError(t, err)
+			assert.EqualValues(t, 0, q.Size(bg))
+
+			// Empty bulk push
+			errs := m.PushBulk(bg, []*client.Job{})
+			assert.Empty(t, errs)
+			assert.EqualValues(t, 0, q.Size(bg))
+
+			// Bulk push 10 valid jobs
+			jobs := make([]*client.Job, 10)
+			for i := range 10 {
+				jobs[i] = client.NewJob("BulkType", i)
+			}
+			errs = m.PushBulk(bg, jobs)
+			assert.Empty(t, errs)
+			assert.EqualValues(t, 10, q.Size(bg))
+
+			// Verify EnqueuedAt was set
+			for _, job := range jobs {
+				assert.NotEmpty(t, job.EnqueuedAt)
+			}
+		})
+
+		t.Run("PushBulkPartialFailure", func(t *testing.T) {
+			assert.NoError(t, store.Flush(bg))
+			m := NewManager(store)
+
+			q, err := store.GetQueue(bg, "default")
+			assert.NoError(t, err)
+			assert.EqualValues(t, 0, q.Size(bg))
+
+			// Mix of valid and invalid jobs
+			goodJob1 := client.NewJob("GoodType", 1)
+			badJobNoType := client.NewJob("", 1)
+			goodJob2 := client.NewJob("AnotherGood", 2)
+			badJobNoArgs := client.NewJob("NoArgs")
+			badJobNoArgs.Args = nil
+
+			jobs := []*client.Job{goodJob1, badJobNoType, goodJob2, badJobNoArgs}
+			errs := m.PushBulk(bg, jobs)
+
+			// 2 errors expected
+			assert.EqualValues(t, 2, len(errs))
+			assert.Contains(t, errs[badJobNoType.Jid].Error(), "jobtype")
+			assert.Contains(t, errs[badJobNoArgs.Jid].Error(), "args")
+
+			// Only 2 valid jobs should be enqueued
+			assert.EqualValues(t, 2, q.Size(bg))
+		})
+
+		t.Run("PushBulkMultipleQueues", func(t *testing.T) {
+			assert.NoError(t, store.Flush(bg))
+			m := NewManager(store)
+
+			q1, err := store.GetQueue(bg, "default")
+			assert.NoError(t, err)
+			assert.EqualValues(t, 0, q1.Size(bg))
+
+			q2, err := store.GetQueue(bg, "critical")
+			assert.NoError(t, err)
+			assert.EqualValues(t, 0, q2.Size(bg))
+
+			jobs := []*client.Job{
+				client.NewJob("Type1", 1),
+				client.NewJob("Type2", 2),
+			}
+			jobs[0].Queue = "default"
+			jobs[1].Queue = "critical"
+
+			errs := m.PushBulk(bg, jobs)
+			assert.Empty(t, errs)
+			assert.EqualValues(t, 1, q1.Size(bg))
+			assert.EqualValues(t, 1, q2.Size(bg))
+		})
+
+		t.Run("PushBulkScheduled", func(t *testing.T) {
+			assert.NoError(t, store.Flush(bg))
+			m := NewManager(store)
+
+			q, err := store.GetQueue(bg, "default")
+			assert.NoError(t, err)
+			assert.EqualValues(t, 0, q.Size(bg))
+			assert.EqualValues(t, 0, store.Scheduled().Size(bg))
+
+			future := time.Now().Add(5 * time.Minute)
+			jobs := []*client.Job{
+				client.NewJob("SchedType1", 1),
+				client.NewJob("SchedType2", 2),
+				client.NewJob("SchedType3", 3),
+			}
+			for _, j := range jobs {
+				j.At = util.Thens(future)
+			}
+
+			errs := m.PushBulk(bg, jobs)
+			assert.Empty(t, errs)
+			assert.EqualValues(t, 0, q.Size(bg))
+			assert.EqualValues(t, 3, store.Scheduled().Size(bg))
+		})
+
+		t.Run("PushBulkMixedSchedule", func(t *testing.T) {
+			assert.NoError(t, store.Flush(bg))
+			m := NewManager(store)
+
+			q, err := store.GetQueue(bg, "default")
+			assert.NoError(t, err)
+			assert.EqualValues(t, 0, q.Size(bg))
+			assert.EqualValues(t, 0, store.Scheduled().Size(bg))
+
+			future := time.Now().Add(5 * time.Minute)
+			past := time.Now().Add(-5 * time.Minute)
+
+			jobs := []*client.Job{
+				client.NewJob("ImmediateType", 1),              // immediate
+				client.NewJob("FutureType", 2),                // scheduled future
+				client.NewJob("PastScheduledType", 3),         // scheduled past (immediate)
+			}
+			jobs[1].At = util.Thens(future)
+			jobs[2].At = util.Thens(past)
+
+			errs := m.PushBulk(bg, jobs)
+			assert.Empty(t, errs)
+			// 2 immediate (one with no At, one with past At)
+			assert.EqualValues(t, 2, q.Size(bg))
+			// 1 future scheduled
+			assert.EqualValues(t, 1, store.Scheduled().Size(bg))
+		})
+
 		t.Run("Fetch", func(t *testing.T) {
 			assert.NoError(t, store.Flush(bg))
 			m := NewManager(store)

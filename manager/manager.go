@@ -55,7 +55,11 @@ func ExpectedError(code string, msg string) error {
 
 type Manager interface {
 	Push(ctx context.Context, job *client.Job) error
-	// TODO PushBulk(jobs []*client.Job) map[*client.Job]error
+	// PushBulk pushes multiple jobs through the same validation, middleware
+	// and enqueue pipeline as Push, but batches the Redis operations to
+	// minimize roundtrips.  It returns a map of per-job errors keyed by JID
+	// for any jobs that failed (empty map means all succeeded).
+	PushBulk(ctx context.Context, jobs []*client.Job) map[string]error
 
 	PauseQueue(ctx context.Context, qName string) error
 	ResumeQueue(ctx context.Context, qName string) error
@@ -241,6 +245,144 @@ func (m *manager) Push(ctx context.Context, job *client.Job) error {
 		}
 	}
 	return err
+}
+
+// pushBulkEntry is an internal struct used to group jobs by queue for batch operations.
+type pushBulkEntry struct {
+	job       *client.Job
+	data      []byte
+	timestamp string
+}
+
+func (m *manager) PushBulk(ctx context.Context, jobs []*client.Job) map[string]error {
+	result := map[string]error{}
+	if len(jobs) == 0 {
+		return result
+	}
+
+	// Phase 1: Apply defaults, validate, parse time, run middleware;
+	// then marshal payload and sort into queue vs scheduled buckets.
+	queueJobs := map[string][]*pushBulkEntry{}
+	var scheduledJobs []*pushBulkEntry
+
+	for _, job := range jobs {
+		if err := m.validateJob(job); err != nil {
+			result[job.Jid] = err
+			continue
+		}
+
+		if job.CreatedAt == "" {
+			job.CreatedAt = util.Nows()
+		}
+		if job.Queue == "" {
+			job.Queue = "default"
+		}
+
+		// Parse scheduled time (must happen before middleware so context is consistent with Push())
+		var scheduledTime time.Time
+		if job.At != "" {
+			var err error
+			scheduledTime, err = util.ParseTime(job.At)
+			if err != nil {
+				result[job.Jid] = fmt.Errorf("invalid timestamp for 'at': %q: %w", job.At, err)
+				continue
+			}
+		}
+
+		// Run per-job middleware (e.g. uniqueness check)
+		ctxh := context.WithValue(ctx, MiddlewareHelperKey, Ctx{job, m, nil})
+		err := callMiddleware(ctxh, m.pushChain, func() error {
+			return nil
+		})
+		if err != nil {
+			if k, ok := err.(KnownError); ok {
+				util.Infof("JID %s: %s", job.Jid, k.Error())
+			}
+			result[job.Jid] = err
+			continue
+		}
+
+		entry := &pushBulkEntry{job: job}
+
+		// Determine destination: scheduled set or queue
+		if job.At != "" && scheduledTime.After(time.Now()) {
+			data, err := json.Marshal(job)
+			if err != nil {
+				result[job.Jid] = fmt.Errorf("cannot marshal job payload: %w", err)
+				continue
+			}
+			entry.data = data
+			entry.timestamp = job.At
+			scheduledJobs = append(scheduledJobs, entry)
+		} else {
+			job.EnqueuedAt = util.Nows()
+			data, err := json.Marshal(job)
+			if err != nil {
+				result[job.Jid] = fmt.Errorf("cannot marshal job payload: %w", err)
+				continue
+			}
+			entry.data = data
+			queueJobs[job.Queue] = append(queueJobs[job.Queue], entry)
+		}
+	}
+
+	// Phase 2: Batch enqueue to queues using a single Redis pipeline per queue
+	for qName, entries := range queueJobs {
+		q, err := m.store.GetQueue(ctx, qName)
+		if err != nil {
+			for _, entry := range entries {
+				result[entry.job.Jid] = fmt.Errorf("cannot get %q queue: %w", qName, err)
+			}
+			continue
+		}
+
+		payloads := make([][]byte, len(entries))
+		for i, entry := range entries {
+			payloads[i] = entry.data
+		}
+
+		if err := q.PushBulk(ctx, payloads); err != nil {
+			for _, entry := range entries {
+				result[entry.job.Jid] = err
+			}
+		}
+	}
+
+	// Phase 3: Batch add scheduled jobs using a single Redis pipeline
+	if len(scheduledJobs) > 0 {
+		elements := make([]storage.SortedElement, len(scheduledJobs))
+		for i, entry := range scheduledJobs {
+			elements[i] = storage.SortedElement{
+				Timestamp: entry.timestamp,
+				Jid:       entry.job.Jid,
+				Payload:   entry.data,
+			}
+		}
+
+		if err := m.store.Scheduled().AddElements(ctx, elements); err != nil {
+			for _, entry := range scheduledJobs {
+				result[entry.job.Jid] = err
+			}
+		}
+	}
+
+	return result
+}
+
+func (m *manager) validateJob(job *client.Job) error {
+	if job.Jid == "" || len(job.Jid) < 8 {
+		return fmt.Errorf("jobs must have a reasonable jid parameter")
+	}
+	if job.Type == "" {
+		return fmt.Errorf("jobs must have a jobtype parameter")
+	}
+	if job.Args == nil {
+		return fmt.Errorf("jobs must have an args parameter")
+	}
+	if job.ReserveFor > 86400 {
+		return fmt.Errorf("jobs cannot be reserved for more than one day")
+	}
+	return nil
 }
 
 func (m *manager) enqueue(ctx context.Context, job *client.Job) error {

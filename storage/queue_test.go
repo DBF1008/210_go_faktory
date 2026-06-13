@@ -150,6 +150,53 @@ func TestBasicQueueOps(t *testing.T) {
 			assert.NoError(t, err)
 			assert.EqualValues(t, 0, counter)
 		})
+
+		t.Run("PushBulk", func(t *testing.T) {
+			_ = store.Flush(bg)
+			q, err := store.GetQueue(bg, "bulk")
+			assert.NoError(t, err)
+			assert.EqualValues(t, 0, q.Size(bg))
+
+			// Empty bulk push
+			err = q.PushBulk(bg, [][]byte{})
+			assert.NoError(t, err)
+			assert.EqualValues(t, 0, q.Size(bg))
+
+			// Push multiple items
+			payloads := [][]byte{
+				[]byte(`{"jid":"job1","queue":"bulk"}`),
+				[]byte(`{"jid":"job2","queue":"bulk"}`),
+				[]byte(`{"jid":"job3","queue":"bulk"}`),
+			}
+			err = q.PushBulk(bg, payloads)
+			assert.NoError(t, err)
+			assert.EqualValues(t, 3, q.Size(bg))
+
+			// Verify items are present
+			count := 0
+			err = q.Each(bg, func(idx int, data []byte) error {
+				count++
+				return nil
+			})
+			assert.NoError(t, err)
+			assert.Equal(t, 3, count)
+
+			// Bulk push to different queue
+			q2, err := store.GetQueue(bg, "bulk2")
+			assert.NoError(t, err)
+			assert.EqualValues(t, 0, q2.Size(bg))
+
+			payloads2 := [][]byte{
+				[]byte(`{"jid":"job4"}`),
+				[]byte(`{"jid":"job5"}`),
+			}
+			err = q2.PushBulk(bg, payloads2)
+			assert.NoError(t, err)
+			assert.EqualValues(t, 2, q2.Size(bg))
+
+			// Original queue unchanged
+			assert.EqualValues(t, 3, q.Size(bg))
+		})
 	})
 }
 

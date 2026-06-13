@@ -2,6 +2,7 @@ package storage
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"testing"
 	"time"
@@ -187,6 +188,57 @@ func TestBasicSortedOps(t *testing.T) {
 			assert.EqualValues(t, 0, sset.Size(bg))
 			assert.EqualValues(t, 1, store.Dead().Size(bg))
 
+		})
+
+		t.Run("AddElements", func(t *testing.T) {
+			sset := store.Scheduled()
+			err := sset.Clear(bg)
+			assert.NoError(t, err)
+			assert.EqualValues(t, 0, sset.Size(bg))
+
+			// Empty batch
+			err = sset.AddElements(bg, []SortedElement{})
+			assert.NoError(t, err)
+			assert.EqualValues(t, 0, sset.Size(bg))
+
+			// Add multiple elements in one call
+			now := time.Now()
+			ts1 := util.Thens(now.Add(1 * time.Minute))
+			ts2 := util.Thens(now.Add(2 * time.Minute))
+			ts3 := util.Thens(now.Add(3 * time.Minute))
+
+			job1 := client.NewJob("BatchJob1", 1)
+			job2 := client.NewJob("BatchJob2", 2)
+			job3 := client.NewJob("BatchJob3", 3)
+
+			data1, _ := json.Marshal(job1)
+			data2, _ := json.Marshal(job2)
+			data3, _ := json.Marshal(job3)
+
+			elements := []SortedElement{
+				{Timestamp: ts1, Jid: job1.Jid, Payload: data1},
+				{Timestamp: ts2, Jid: job2.Jid, Payload: data2},
+				{Timestamp: ts3, Jid: job3.Jid, Payload: data3},
+			}
+
+			err = sset.AddElements(bg, elements)
+			assert.NoError(t, err)
+			assert.EqualValues(t, 3, sset.Size(bg))
+
+			// Verify all elements are present
+			count := 0
+			err = sset.Each(bg, func(idx int, entry SortedEntry) error {
+				j, err := entry.Job()
+				assert.NoError(t, err)
+				assert.NotNil(t, j)
+				count++
+				return nil
+			})
+			assert.NoError(t, err)
+			assert.Equal(t, 3, count)
+
+			err = sset.Clear(bg)
+			assert.NoError(t, err)
 		})
 	})
 }

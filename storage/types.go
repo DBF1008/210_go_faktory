@@ -57,6 +57,8 @@ type Queue interface {
 
 	Add(ctx context.Context, job *client.Job) error
 	Push(ctx context.Context, data []byte) error
+	// PushBulk enqueues multiple payloads in a single Redis pipeline roundtrip.
+	PushBulk(ctx context.Context, payloads [][]byte) error
 
 	Pop(ctx context.Context) ([]byte, error)
 	BPop(ctx context.Context) ([]byte, error)
@@ -74,6 +76,13 @@ type SortedEntry interface {
 	Job() (*client.Job, error)
 }
 
+// SortedElement represents a single element to be added to a SortedSet.
+type SortedElement struct {
+	Timestamp string
+	Jid       string
+	Payload   []byte
+}
+
 type SortedSet interface {
 	Name() string
 	Size(ctx context.Context) uint64
@@ -81,6 +90,8 @@ type SortedSet interface {
 
 	Add(ctx context.Context, job *client.Job) error
 	AddElement(ctx context.Context, timestamp string, jid string, payload []byte) error
+	// AddElements adds multiple elements to the sorted set in a single Redis pipeline roundtrip.
+	AddElements(ctx context.Context, elements []SortedElement) error
 
 	Get(ctx context.Context, key []byte) (SortedEntry, error)
 	Page(ctx context.Context, start int, count int, fn func(index int, e SortedEntry) error) (int, error)

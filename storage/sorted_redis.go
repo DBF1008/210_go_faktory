@@ -64,6 +64,24 @@ func (rs *redisSorted) AddElement(ctx context.Context, timestamp string, jid str
 	return err
 }
 
+func (rs *redisSorted) AddElements(ctx context.Context, elements []SortedElement) error {
+	if len(elements) == 0 {
+		return nil
+	}
+	_, err := rs.store.rclient.Pipelined(ctx, func(pipe redis.Pipeliner) error {
+		for _, elem := range elements {
+			tim, err := util.ParseTime(elem.Timestamp)
+			if err != nil {
+				return err
+			}
+			time_f := float64(tim.Unix()) + (float64(tim.Nanosecond()) / 1000000000)
+			pipe.ZAdd(ctx, rs.name, redis.Z{Score: time_f, Member: elem.Payload})
+		}
+		return nil
+	})
+	return err
+}
+
 func decompose(key []byte) (float64, string, error) {
 	slice := strings.Split(string(key), "|")
 	if len(slice) != 2 {

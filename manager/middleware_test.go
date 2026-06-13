@@ -88,6 +88,48 @@ func TestLiveMiddleware(t *testing.T) {
 			assert.EqualValues(t, 3, counter)
 		})
 
+		t.Run("PushBulk", func(t *testing.T) {
+			denied := ExpectedError("DENIED", "push denied")
+			assert.NoError(t, store.Flush(bg))
+			m := NewManager(store)
+			counter := 0
+
+			m.AddMiddleware("push", func(ctx context.Context, next func() error) error {
+				counter += 1
+				mh := ctx.Value(MiddlewareHelperKey).(Ctx)
+				if mh.Job().Type == "Blocked" {
+					return denied
+				}
+				return next()
+			})
+
+			q, err := store.GetQueue(bg, "default")
+			assert.NoError(t, err)
+			assert.EqualValues(t, 0, q.Size(bg))
+
+			// Mix of allowed and blocked jobs
+			jobs := []*client.Job{
+				client.NewJob("Allowed1", 1),
+				client.NewJob("Blocked", 2),
+				client.NewJob("Allowed2", 3),
+				client.NewJob("Blocked", 4),
+				client.NewJob("Allowed3", 5),
+			}
+
+			errs := m.PushBulk(bg, jobs)
+
+			// 2 blocked jobs should have errors
+			assert.EqualValues(t, 2, len(errs))
+			assert.Equal(t, denied, errs[jobs[1].Jid])
+			assert.Equal(t, denied, errs[jobs[3].Jid])
+
+			// 3 allowed jobs should be enqueued
+			assert.EqualValues(t, 3, q.Size(bg))
+
+			// Middleware should have been called for all 5 jobs
+			assert.EqualValues(t, 5, counter)
+		})
+
 		t.Run("Fetch", func(t *testing.T) {
 			denied := ExpectedError("DENIED", "fetch denied")
 
