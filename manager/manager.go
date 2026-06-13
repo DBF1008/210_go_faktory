@@ -19,8 +19,10 @@ const (
 	// in the job payload.
 	DefaultTimeout = 30 * 60
 
-	// Save dead jobs for 180 days, after that they will be purged
-	DeadTTL = 180 * 24 * time.Hour
+	// DefaultDeadTTL is the default length of time dead jobs are retained
+	// before they are purged. It can be overridden via the `dead_timeout`
+	// setting in the `[faktory]` config section.
+	DefaultDeadTTL = 180 * 24 * time.Hour
 )
 
 // A KnownError is one that returns a specific error code to the client
@@ -115,6 +117,13 @@ type Manager interface {
 	KV() storage.KV
 	Redis() *redis.Client
 	SetFetcher(f Fetcher)
+
+	// DeadTTL returns how long newly dead jobs are retained before purge.
+	DeadTTL() time.Duration
+	// SetDeadTTL updates the retention applied to jobs subsequently sent to
+	// the morgue. It is the single source of truth shared by the fail,
+	// mutate (KILL) and Web UI kill paths, and is refreshed on config reload.
+	SetDeadTTL(d time.Duration)
 }
 
 func NewManager(s storage.Store) Manager {
@@ -129,6 +138,7 @@ func newManager(s storage.Store) *manager {
 		failChain:  make(MiddlewareChain, 0),
 		ackChain:   make(MiddlewareChain, 0),
 		fetchChain: make(MiddlewareChain, 0),
+		deadTTL:    DefaultDeadTTL,
 	}
 	ctx := context.Background()
 	_ = m.loadWorkingSet(ctx)
@@ -140,6 +150,18 @@ func newManager(s storage.Store) *manager {
 
 func (m *manager) SetFetcher(f Fetcher) {
 	m.fetcher = f
+}
+
+func (m *manager) DeadTTL() time.Duration {
+	m.workingMutex.RLock()
+	defer m.workingMutex.RUnlock()
+	return m.deadTTL
+}
+
+func (m *manager) SetDeadTTL(d time.Duration) {
+	m.workingMutex.Lock()
+	defer m.workingMutex.Unlock()
+	m.deadTTL = d
 }
 
 func (m *manager) KV() storage.KV {
@@ -186,6 +208,7 @@ type manager struct {
 	failChain    MiddlewareChain
 	ackChain     MiddlewareChain
 	paused       []string
+	deadTTL      time.Duration
 	workingMutex sync.RWMutex
 }
 

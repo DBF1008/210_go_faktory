@@ -260,9 +260,10 @@ func actOn(req *http.Request, set storage.SortedSet, action string, keys []strin
 		if len(keys) == 1 && keys[0] == "all" {
 			return ctx(req).Store().EnqueueAll(c, set)
 		} else {
-			// TODO Make this 180 day dead job expiry dynamic per-job or
-			// a global variable in TOML? PRs welcome.
-			expiry := time.Now().Add(180 * 24 * time.Hour)
+			// Dead job retention is owned by the manager (configurable via the
+			// `dead_timeout` setting and refreshed on reload) so that the fail,
+			// mutate and Web UI kill paths share a single source of truth.
+			expiry := time.Now().Add(ctx(req).Server().Manager().DeadTTL())
 			for idx := range keys {
 				entry, err := set.Get(c, []byte(keys[idx]))
 				if err != nil {

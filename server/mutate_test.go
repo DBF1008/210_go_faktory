@@ -1,10 +1,13 @@
 package server
 
 import (
+	"context"
+	"strings"
 	"testing"
 	"time"
 
 	faktory "github.com/contribsys/faktory/client"
+	"github.com/contribsys/faktory/storage"
 	"github.com/contribsys/faktory/util"
 	"github.com/stretchr/testify/assert"
 )
@@ -210,4 +213,56 @@ func TestMutateCommands(t *testing.T) {
 		assert.EqualValues(t, 3, state.Data.Queues["default"])
 
 	})
+}
+
+// TestMutateKillRespectsDeadTimeout verifies the MUTATE KILL command stamps the
+// dead job with the manager's configured retention rather than a hardcoded TTL.
+func TestMutateKillRespectsDeadTimeout(t *testing.T) {
+	t.Setenv("FAKTORY_URL", "tcp://localhost:7599")
+	runServer("localhost:7599", func(s *Server) {
+		bg := context.Background()
+		assert.NoError(t, s.Store().Flush(bg))
+
+		// simulate an operator-configured retention
+		ttl := 72 * time.Hour
+		s.Manager().SetDeadTTL(ttl)
+
+		cl, err := faktory.Open()
+		assert.NoError(t, err)
+
+		j := faktory.NewJob("KillMe", "x")
+		j.At = util.Thens(time.Now().Add(1 * time.Hour))
+		assert.NoError(t, cl.Push(j))
+
+		before := time.Now()
+		assert.NoError(t, cl.Kill(faktory.Scheduled, faktory.OfType("KillMe")))
+		after := time.Now()
+
+		assert.EqualValues(t, 1, s.Store().Dead().Size(bg))
+		expiry := firstDeadExpiry(t, bg, s.Store())
+		assert.WithinRange(t, expiry,
+			before.Add(ttl).Add(-2*time.Second),
+			after.Add(ttl).Add(2*time.Second))
+	})
+}
+
+// firstDeadExpiry returns the expiry timestamp encoded in the first entry of
+// the dead set, decoded from its "timestamp|jid" key.
+func firstDeadExpiry(t *testing.T, ctx context.Context, store storage.Store) time.Time {
+	var out time.Time
+	_, err := store.Dead().Page(ctx, 0, 10, func(idx int, e storage.SortedEntry) error {
+		key, err := e.Key()
+		if err != nil {
+			return err
+		}
+		ts, _, _ := strings.Cut(string(key), "|")
+		tm, err := util.ParseTime(ts)
+		if err != nil {
+			return err
+		}
+		out = tm
+		return nil
+	})
+	assert.NoError(t, err)
+	return out
 }

@@ -137,7 +137,7 @@ func (m *manager) processFailure(ctx context.Context, jid string, failure *FailP
 		if job.Failure.RetryCount < *job.Retry {
 			return retryLater(ctx, m.store, job)
 		}
-		return sendToMorgue(ctx, m.store, job)
+		return m.sendToMorgue(ctx, job)
 	})
 }
 
@@ -152,14 +152,14 @@ func retryLater(ctx context.Context, store storage.Store, job *client.Job) error
 	return store.Retries().AddElement(ctx, when, job.Jid, bytes)
 }
 
-func sendToMorgue(ctx context.Context, store storage.Store, job *client.Job) error {
+func (m *manager) sendToMorgue(ctx context.Context, job *client.Job) error {
 	bytes, err := json.Marshal(job)
 	if err != nil {
 		return fmt.Errorf("cannot marshal job payload: %w", err)
 	}
 
-	expiry := util.Thens(time.Now().Add(DeadTTL))
-	return store.Dead().AddElement(ctx, expiry, job.Jid, bytes)
+	expiry := util.Thens(time.Now().Add(m.DeadTTL()))
+	return m.store.Dead().AddElement(ctx, expiry, job.Jid, bytes)
 }
 
 func nextRetry(job *client.Job) time.Time {

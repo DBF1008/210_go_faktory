@@ -2,10 +2,13 @@ package manager
 
 import (
 	"context"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/contribsys/faktory/client"
 	"github.com/contribsys/faktory/storage"
+	"github.com/contribsys/faktory/util"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -124,4 +127,92 @@ func failure(jid, msg, errtype string, bt []string) *FailPayload {
 	f.ErrorType = errtype
 	f.Backtrace = bt
 	return &f
+}
+
+func TestDeadRetention(t *testing.T) {
+	withRedis(t, "deadttl", func(t *testing.T, store storage.Store) {
+		bg := context.Background()
+
+		t.Run("defaults to DefaultDeadTTL", func(t *testing.T) {
+			m := newManager(store)
+			assert.Equal(t, DefaultDeadTTL, m.DeadTTL())
+		})
+
+		t.Run("SetDeadTTL updates the retention", func(t *testing.T) {
+			m := newManager(store)
+			m.SetDeadTTL(48 * time.Hour)
+			assert.Equal(t, 48*time.Hour, m.DeadTTL())
+		})
+
+		t.Run("sendToMorgue honors the configured TTL", func(t *testing.T) {
+			assert.NoError(t, store.Flush(bg))
+			m := newManager(store)
+			ttl := 36 * time.Hour
+			m.SetDeadTTL(ttl)
+
+			job := client.NewJob("DeadJob", 1, 2, 3)
+			before := time.Now()
+			assert.NoError(t, m.sendToMorgue(bg, job))
+			after := time.Now()
+
+			assert.EqualValues(t, 1, store.Dead().Size(bg))
+			expiry := firstDeadExpiry(t, bg, store)
+			assert.WithinRange(t, expiry,
+				before.Add(ttl).Add(-2*time.Second),
+				after.Add(ttl).Add(2*time.Second))
+		})
+
+		t.Run("exhausting retries uses the configured TTL", func(t *testing.T) {
+			assert.NoError(t, store.Flush(bg))
+			m := newManager(store)
+			ttl := 12 * time.Hour
+			m.SetDeadTTL(ttl)
+
+			job := client.NewJob("DeadJob", 1)
+			retries := 1
+			job.Retry = &retries
+			// Pre-populate a Failure that is already on its last attempt so a
+			// single Fail exhausts retries and routes the job to the morgue.
+			job.Failure = &client.Failure{
+				RetryCount:     1,
+				RetryRemaining: 0,
+				FailedAt:       util.Nows(),
+			}
+
+			lease := &simpleLease{job: job}
+			assert.NoError(t, m.reserve(bg, "workerId", lease))
+
+			before := time.Now()
+			assert.NoError(t, m.Fail(bg, failure(job.Jid, "boom", "Err", nil)))
+			after := time.Now()
+
+			assert.EqualValues(t, 0, store.Retries().Size(bg))
+			assert.EqualValues(t, 1, store.Dead().Size(bg))
+			expiry := firstDeadExpiry(t, bg, store)
+			assert.WithinRange(t, expiry,
+				before.Add(ttl).Add(-2*time.Second),
+				after.Add(ttl).Add(2*time.Second))
+		})
+	})
+}
+
+// firstDeadExpiry returns the expiry timestamp encoded in the first entry of
+// the dead set, decoded from its "timestamp|jid" key.
+func firstDeadExpiry(t *testing.T, ctx context.Context, store storage.Store) time.Time {
+	var out time.Time
+	_, err := store.Dead().Page(ctx, 0, 10, func(idx int, e storage.SortedEntry) error {
+		key, err := e.Key()
+		if err != nil {
+			return err
+		}
+		ts, _, _ := strings.Cut(string(key), "|")
+		tm, err := util.ParseTime(ts)
+		if err != nil {
+			return err
+		}
+		out = tm
+		return nil
+	})
+	assert.NoError(t, err)
+	return out
 }

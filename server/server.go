@@ -120,7 +120,17 @@ func (s *Server) Manager() manager.Manager {
 	return s.manager
 }
 
+// deadTTL resolves the configured dead job retention from the current global
+// config, falling back to manager.DefaultDeadTTL. It is read at boot and on
+// every reload so newly dead jobs honor the latest configuration.
+func (s *Server) deadTTL() time.Duration {
+	return s.Options.Duration("faktory", "dead_timeout", manager.DefaultDeadTTL)
+}
+
 func (s *Server) Reload() {
+	if s.manager != nil {
+		s.manager.SetDeadTTL(s.deadTTL())
+	}
 	for idx := range s.Subsystems {
 		subsystem := s.Subsystems[idx]
 		if err := subsystem.Reload(s); err != nil {
@@ -159,6 +169,7 @@ func (s *Server) Boot() error {
 	s.store = store
 	s.workers = newWorkers()
 	s.manager = manager.NewManager(store)
+	s.manager.SetDeadTTL(s.deadTTL())
 	s.listener = listener
 	s.stopper = make(chan bool)
 	s.startTasks()

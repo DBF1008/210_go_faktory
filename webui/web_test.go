@@ -7,6 +7,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/contribsys/faktory/server"
 	"github.com/contribsys/faktory/storage"
@@ -147,4 +148,66 @@ func fakeJob() (string, []byte) {
 			"tenant":1
 		}
 	}`, jid, nows, nows, nows, nows)
+}
+
+// TestKillUsesConfiguredDeadTTL verifies the Web UI "kill" action stamps dead
+// jobs with the manager's configured retention rather than a hardcoded TTL,
+// keeping the Web UI consistent with the fail and MUTATE KILL paths.
+func TestKillUsesConfiguredDeadTTL(t *testing.T) {
+	bootRuntime(t, "killttl", func(ui *WebUI, s *server.Server, t *testing.T) {
+		bg := context.Background()
+		assert.NoError(t, s.Store().Flush(bg))
+
+		// an operator-configured retention, distinct from the default
+		ttl := 96 * time.Hour
+		s.Manager().SetDeadTTL(ttl)
+
+		retries := s.Store().Retries()
+		jid, data := fakeJob()
+		assert.NoError(t, retries.AddElement(bg, util.Nows(), jid, data))
+
+		var key []byte
+		assert.NoError(t, retries.Each(bg, func(idx int, e storage.SortedEntry) error {
+			var err error
+			key, err = e.Key()
+			return err
+		}))
+
+		// drive the same code path the Scheduled/Retries pages use for "kill"
+		req, err := ui.NewRequest("POST", "http://localhost:7420/retries", nil)
+		assert.NoError(t, err)
+
+		before := time.Now()
+		assert.NoError(t, actOn(req, retries, "kill", []string{string(key)}))
+		after := time.Now()
+
+		assert.EqualValues(t, 0, retries.Size(bg))
+		assert.EqualValues(t, 1, s.Store().Dead().Size(bg))
+
+		expiry := firstDeadExpiry(t, bg, s.Store())
+		assert.WithinRange(t, expiry,
+			before.Add(ttl).Add(-2*time.Second),
+			after.Add(ttl).Add(2*time.Second))
+	})
+}
+
+// firstDeadExpiry returns the expiry timestamp encoded in the first entry of
+// the dead set, decoded from its "timestamp|jid" key.
+func firstDeadExpiry(t *testing.T, ctx context.Context, store storage.Store) time.Time {
+	var out time.Time
+	_, err := store.Dead().Page(ctx, 0, 10, func(idx int, e storage.SortedEntry) error {
+		key, err := e.Key()
+		if err != nil {
+			return err
+		}
+		ts, _, _ := strings.Cut(string(key), "|")
+		tm, err := util.ParseTime(ts)
+		if err != nil {
+			return err
+		}
+		out = tm
+		return nil
+	})
+	assert.NoError(t, err)
+	return out
 }

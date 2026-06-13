@@ -1,6 +1,10 @@
 package server
 
-import "github.com/contribsys/faktory/util"
+import (
+	"time"
+
+	"github.com/contribsys/faktory/util"
+)
 
 // This is the ultimate scalability limitation in Faktory,
 // we only allow this many connections to Redis.
@@ -44,4 +48,30 @@ func (so *ServerOptions) Config(subsys string, key string, defval any) any {
 		return defval
 	}
 	return val
+}
+
+// Duration reads a Go duration string (e.g. "4320h") from the named config
+// element and parses it with time.ParseDuration. If the value is missing,
+// not a string, unparseable, or non-positive, defval is returned and a
+// warning is logged.
+func (so *ServerOptions) Duration(subsys string, key string, defval time.Duration) time.Duration {
+	val := so.Config(subsys, key, nil)
+	if val == nil {
+		return defval
+	}
+	str, ok := val.(string)
+	if !ok {
+		util.Warnf("Config error: %s/%s must be a duration string, using default %v", subsys, key, defval)
+		return defval
+	}
+	dur, err := time.ParseDuration(str)
+	if err != nil {
+		util.Warnf("Config error: %s/%s is not a valid duration (%q): %v, using default %v", subsys, key, str, err, defval)
+		return defval
+	}
+	if dur <= 0 {
+		util.Warnf("Config error: %s/%s must be a positive duration, using default %v", subsys, key, defval)
+		return defval
+	}
+	return dur
 }

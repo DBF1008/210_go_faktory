@@ -1,3 +1,10 @@
+[faktory]
+# How long dead jobs are retained in the morgue before they are purged.
+# Accepts a Go duration string; 4320h == 180 days (the default).
+# This is applied to jobs sent to the morgue via failure exhaustion, the
+# MUTATE KILL command, and the "Kill" action in the Web UI. Reloaded on HUP.
+dead_timeout = "4320h"
+
 [queues]
 # disable backpressure by default
 backpressure = 0

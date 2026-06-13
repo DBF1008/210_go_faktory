@@ -18,15 +18,16 @@ var (
 	}
 )
 
-func mutateKill(ctx context.Context, store storage.Store, op client.Operation) error {
+func mutateKill(ctx context.Context, store storage.Store, mgr manager.Manager, op client.Operation) error {
 	ss := setForTarget(store, string(op.Target))
 	if ss == nil {
 		return fmt.Errorf("invalid target for mutation command")
 	}
+	expiry := time.Now().Add(mgr.DeadTTL())
 	match, matchfn := matchForFilter(op.Filter)
 	return ss.Find(ctx, match, func(idx int, ent storage.SortedEntry) error {
 		if matchfn(string(ent.Value())) {
-			return ss.MoveTo(ctx, store.Dead(), ent, time.Now().Add(manager.DeadTTL))
+			return ss.MoveTo(ctx, store.Dead(), ent, expiry)
 		}
 		return nil
 	})
@@ -135,7 +136,7 @@ func mutate(c *Connection, s *Server, cmd string) {
 	case "clear":
 		err = mutateClear(ctx, s.Store(), string(op.Target))
 	case "kill":
-		err = mutateKill(ctx, s.Store(), op)
+		err = mutateKill(ctx, s.Store(), s.Manager(), op)
 	case "discard":
 		err = mutateDiscard(ctx, s.Store(), op)
 	case "requeue":
