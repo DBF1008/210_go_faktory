@@ -389,7 +389,7 @@ func TestPages(t *testing.T) {
 				StartedAt: time.Now(),
 				Version:   2,
 			}
-			s.Heartbeats()[wid] = wrk
+			s.SetHeartbeat(wrk)
 
 			w := httptest.NewRecorder()
 			busyHandler(w, req)
@@ -426,7 +426,7 @@ func TestPages(t *testing.T) {
 				StartedAt: time.Now(),
 				Version:   2,
 			}
-			s.Heartbeats()[wid] = wrk
+			s.SetHeartbeat(wrk)
 
 			w := httptest.NewRecorder()
 

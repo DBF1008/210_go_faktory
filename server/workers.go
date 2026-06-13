@@ -107,6 +107,26 @@ func (worker *ClientData) ConnectionCount() int {
 	return len(worker.connections)
 }
 
+// snapshot returns a deep copy of the ClientData.
+// Must be called while the caller holds the workers read (or write) lock,
+// because it reads worker.connections and worker.state.
+func (worker *ClientData) snapshot() *ClientData {
+	cp := *worker
+	// Deep-copy the connections map
+	if worker.connections != nil {
+		cp.connections = make(map[io.Closer]bool, len(worker.connections))
+		for k, v := range worker.connections {
+			cp.connections[k] = v
+		}
+	}
+	// Deep-copy the Labels slice
+	if worker.Labels != nil {
+		cp.Labels = make([]string, len(worker.Labels))
+		copy(cp.Labels, worker.Labels)
+	}
+	return &cp
+}
+
 func (worker *ClientData) IsQuiet() bool {
 	return worker.state != Running
 }
@@ -158,6 +178,43 @@ func (w *workers) Count() int {
 	return len(w.heartbeats)
 }
 
+// Snapshot returns a deep copy of the current heartbeat map.
+// Each *ClientData value is an independent copy, so callers may
+// iterate and read the returned map without holding any lock and
+// without risking data races against concurrent heartbeat, reap,
+// or signal operations.
+func (w *workers) Snapshot() map[string]*ClientData {
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+	snap := make(map[string]*ClientData, len(w.heartbeats))
+	for k, v := range w.heartbeats {
+		snap[k] = v.snapshot()
+	}
+	return snap
+}
+
+// SignalWorkers sends the given signal to the worker identified by wid.
+// If wid is "all", every registered worker is signalled.
+// The operation runs under the write lock so it is safe to call
+// concurrently with heartbeat, reap, and connection removal.
+func (w *workers) SignalWorkers(wid string, signal WorkerState) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	for k, cd := range w.heartbeats {
+		if wid == "all" || wid == k {
+			cd.Signal(signal)
+		}
+	}
+}
+
+// setHeartbeat inserts or replaces a ClientData entry in the heartbeat map.
+// It is primarily intended for test setup.
+func (w *workers) setHeartbeat(cd *ClientData) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.heartbeats[cd.Wid] = cd
+}
+
 func (w *workers) setupHeartbeat(client *ClientData, cls io.Closer) (*ClientData, bool) {
 	var entry *ClientData
 	var ok bool
@@ -183,6 +240,10 @@ func (w *workers) setupHeartbeat(client *ClientData, cls io.Closer) (*ClientData
 func (w *workers) heartbeat(client *ClientBeat) (*ClientData, bool) {
 	w.mu.RLock()
 	entry, ok := w.heartbeats[client.Wid]
+	var curState WorkerState
+	if ok {
+		curState = entry.state
+	}
 	w.mu.RUnlock()
 
 	if !ok {
@@ -191,7 +252,7 @@ func (w *workers) heartbeat(client *ClientBeat) (*ClientData, bool) {
 
 	// util.Debugf("BEAT for %s", client.Wid)
 
-	newst := entry.state
+	newst := curState
 	if client.CurrentState != "" {
 		newst = stateFromString(client.CurrentState)
 	}

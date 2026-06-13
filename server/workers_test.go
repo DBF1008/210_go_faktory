@@ -2,6 +2,7 @@ package server
 
 import (
 	"io"
+	"sync"
 	"testing"
 	"time"
 
@@ -112,3 +113,209 @@ type cls struct{}
 func (c cls) Close() error {
 	return nil
 }
+
+func TestSnapshotReturnsCopy(t *testing.T) {
+	t.Parallel()
+
+	w := newWorkers()
+	cd := &ClientData{
+		Wid:         "wid-1",
+		Hostname:    "host",
+		Pid:         1,
+		connections: map[io.Closer]bool{},
+	}
+	w.setupHeartbeat(cd, &cls{})
+
+	snap := w.Snapshot()
+	assert.Equal(t, 1, len(snap))
+	assert.NotNil(t, snap["wid-1"])
+
+	// Deleting from the snapshot must NOT affect the live map.
+	delete(snap, "wid-1")
+	assert.Equal(t, 1, w.Count(), "snapshot mutation should not affect live map")
+
+	// The live map should still be intact.
+	snap2 := w.Snapshot()
+	assert.Equal(t, 1, len(snap2))
+}
+
+func TestSignalWorkers(t *testing.T) {
+	t.Parallel()
+
+	w := newWorkers()
+	for _, wid := range []string{"a", "b", "c"} {
+		cd := &ClientData{
+			Wid:         wid,
+			connections: map[io.Closer]bool{},
+		}
+		w.setupHeartbeat(cd, &cls{})
+	}
+	assert.Equal(t, 3, w.Count())
+
+	// Signal a single worker
+	w.SignalWorkers("a", Quiet)
+	snap := w.Snapshot()
+	assert.Equal(t, Quiet, snap["a"].state)
+	assert.Equal(t, Running, snap["b"].state)
+	assert.Equal(t, Running, snap["c"].state)
+
+	// Signal all
+	w.SignalWorkers("all", Quiet)
+	snap = w.Snapshot()
+	assert.Equal(t, Quiet, snap["a"].state)
+	assert.Equal(t, Quiet, snap["b"].state)
+	assert.Equal(t, Quiet, snap["c"].state)
+}
+
+func TestSignalWorkersIdempotent(t *testing.T) {
+	t.Parallel()
+
+	w := newWorkers()
+	cd := &ClientData{
+		Wid:         "x",
+		connections: map[io.Closer]bool{},
+	}
+	w.setupHeartbeat(cd, &cls{})
+
+	// Signalling a non-existent wid is a no-op
+	w.SignalWorkers("nonexistent", Quiet)
+	snap := w.Snapshot()
+	assert.Equal(t, Running, snap["x"].state)
+}
+
+// TestConcurrentSnapshotAndMutations runs concurrent producers (heartbeat,
+// setupHeartbeat, reapHeartbeats) and consumers (Snapshot, SignalWorkers)
+// to verify that no data race occurs.  Run with -race to detect issues.
+func TestConcurrentSnapshotAndMutations(t *testing.T) {
+	t.Parallel()
+
+	w := newWorkers()
+	const workers = 20
+	const iterations = 200
+
+	// Pre-populate workers
+	closers := make([]*cls, workers)
+	for i := 0; i < workers; i++ {
+		closers[i] = &cls{}
+		cd := &ClientData{
+			Wid:         widFor(i),
+			Hostname:    "host",
+			Pid:         i,
+			connections: map[io.Closer]bool{},
+		}
+		w.setupHeartbeat(cd, closers[i])
+	}
+
+	var wg sync.WaitGroup
+
+	// Goroutine 1: continuously send heartbeats
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < iterations; i++ {
+			beat := &ClientBeat{Wid: widFor(i % workers)}
+			w.heartbeat(beat)
+		}
+	}()
+
+	// Goroutine 2: continuously take snapshots
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < iterations; i++ {
+			snap := w.Snapshot()
+			// Iterate the snapshot (simulating webui busyWorkers)
+			for _, cd := range snap {
+				_ = cd.Wid
+				_ = cd.IsQuiet()
+				_ = cd.ConnectionCount()
+			}
+		}
+	}()
+
+	// Goroutine 3: continuously signal workers (simulating busyHandler POST)
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < iterations; i++ {
+			w.SignalWorkers(widFor(i%workers), Quiet)
+		}
+	}()
+
+	// Goroutine 4: continuously add connections (exercises setupHeartbeat lock path)
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < iterations; i++ {
+			idx := i % workers
+			c := &cls{}
+			// Re-register heartbeat with a new closer; setupHeartbeat will
+			// add to the existing entry's connections map under the write lock.
+			cd := &ClientData{
+				Wid:         widFor(idx),
+				Hostname:    "host",
+				Pid:         idx,
+				connections: map[io.Closer]bool{},
+			}
+			entry, _ := w.setupHeartbeat(cd, c)
+			// Now build a Connection that wraps the *actual* entry so that
+			// RemoveConnection can find and delete it from connections.
+			conn := &Connection{client: entry, conn: &nopWriteCloser{}}
+			// Register conn in the connections map so RemoveConnection finds it.
+			w.mu.Lock()
+			entry.connections[conn] = true
+			w.mu.Unlock()
+			w.RemoveConnection(conn)
+		}
+	}()
+
+	// Goroutine 5: continuously reap heartbeats
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < iterations; i++ {
+			// Use a time in the past so nothing gets reaped during the race test
+			w.reapHeartbeats(time.Now().Add(-1 * time.Hour))
+		}
+	}()
+
+	wg.Wait()
+}
+
+// TestConcurrentSnapshotReadAfterReap verifies that a snapshot taken before
+// a reap is still safely iterable even after the underlying entries are removed.
+func TestConcurrentSnapshotReadAfterReap(t *testing.T) {
+	t.Parallel()
+
+	w := newWorkers()
+	cd := &ClientData{
+		Wid:           "reapme",
+		connections:   map[io.Closer]bool{},
+		lastHeartbeat: time.Now().Add(-10 * time.Minute),
+	}
+	w.setupHeartbeat(cd, &cls{})
+
+	// Take a snapshot before reaping
+	snap := w.Snapshot()
+	assert.Equal(t, 1, len(snap))
+
+	// Reap the worker (its lastHeartbeat is in the past)
+	reaped := w.reapHeartbeats(time.Now())
+	assert.Equal(t, 1, reaped)
+	assert.Equal(t, 0, w.Count())
+
+	// The snapshot should still be safely iterable (the pointer is still valid).
+	for _, v := range snap {
+		assert.Equal(t, "reapme", v.Wid)
+	}
+}
+
+func widFor(i int) string {
+	return "wid-" + string(rune('A'+i))
+}
+
+// nopWriteCloser satisfies io.WriteCloser for test Connection objects.
+type nopWriteCloser struct{}
+
+func (nopWriteCloser) Write(p []byte) (int, error) { return len(p), nil }
+func (nopWriteCloser) Close() error                 { return nil }

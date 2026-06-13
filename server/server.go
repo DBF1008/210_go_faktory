@@ -108,8 +108,24 @@ func NewServer(opts *ServerOptions) (*Server, error) {
 	return s, nil
 }
 
+// Heartbeats returns a point-in-time deep-copy snapshot of the worker
+// heartbeat map.  The returned map and its *ClientData values are
+// independent of the live state, so callers may iterate and read them
+// without holding any lock and without risking data races.
 func (s *Server) Heartbeats() map[string]*ClientData {
-	return s.workers.heartbeats
+	return s.workers.Snapshot()
+}
+
+// SignalWorkers sends the given WorkerState signal to the worker identified
+// by wid (or all workers when wid == "all"), under the workers lock.
+func (s *Server) SignalWorkers(wid string, signal WorkerState) {
+	s.workers.SignalWorkers(wid, signal)
+}
+
+// SetHeartbeat inserts or replaces a worker entry in the heartbeat map.
+// It is primarily intended for test setup.
+func (s *Server) SetHeartbeat(cd *ClientData) {
+	s.workers.setHeartbeat(cd)
 }
 
 func (s *Server) Store() storage.Store {
